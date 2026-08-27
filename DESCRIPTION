@@ -1,0 +1,42 @@
+Package: scalableCounterfactual
+Type: Package
+Title: Scalable Counterfactual Distribution and Quantile Decomposition
+Version: 1.0.0
+Authors@R: person("Yongrok", "Kim", email = "k3644366@sogang.ac.kr", role = c("aut", "cre"))
+Description: Provides modular estimators for counterfactual distributions and
+    quantile decompositions following Chernozhukov, Fernandez-Val, and Melly
+    (2013) <doi:10.3982/ECTA10582>. Conditional models and computation backends are configured
+    independently. Supported models include quantile and censored quantile
+    regression, location and location-scale models, distribution regression,
+    and Cox duration regression. The quantile-regression backend provides
+    weighted exact process solvers and the process-aware one-step approximation
+    proposed by Chernozhukov, Fernandez-Val, and Melly (2022)
+    <doi:10.1007/s00181-020-01898-0>.
+    Inference includes checkpointed bootstrap, deterministic failed-draw
+    replacement, pointwise and uniform bands, and functional KS/CMS tests.
+    Large-sample features include bounded-memory marginalization, parallel
+    execution, reproducible benchmarks, and optional CuPy CUDA computation.
+    Quantile-crossing diagnostics, rearrangement, simulation validation,
+    command-line adapters, and extension registries are included. The package
+    core remains independent of application-specific variable names and sample
+    definitions.
+License: GPL (>= 2)
+URL: https://github.com/K1mYongrok/scalableCounterfactual
+BugReports: https://github.com/K1mYongrok/scalableCounterfactual/issues
+Encoding: UTF-8
+Imports:
+    codetools,
+    data.table,
+    graphics,
+    Hmisc,
+    parallel,
+    quantreg,
+    survival,
+    stats,
+    utils
+Suggests:
+    fastglm,
+    processx,
+    reticulate,
+    speedglm
+RoxygenNote: 7.3.3

@@ -1,0 +1,11 @@
+^\.github$
+^\.gitignore$
+^GETTING_STARTED_KO[.]md$
+^tools$
+^output$
+^tmp$
+^release$
+^[^/]+[.]Rcheck$
+^scalableCounterfactual_[0-9].*[.]tar[.]gz$
+^inst/python/__pycache__($|/)
+\.py[co]$

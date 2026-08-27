@@ -1,0 +1,10 @@
+*.Rcheck/
+*.tar.gz
+release/
+output/
+tmp/
+__pycache__/
+*.py[cod]
+.Rhistory
+.RData
+.Rproj.user/

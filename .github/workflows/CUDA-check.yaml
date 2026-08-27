@@ -1,0 +1,51 @@
+name: CUDA-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cuda:
+    runs-on: [self-hosted, Windows, X64, CUDA]
+    timeout-minutes: 30
+    env:
+      SCALABLECF_GPU_PYTHON: ${{ vars.SCALABLECF_GPU_PYTHON }}
+      SCALABLECF_GPU_PATH: ${{ vars.SCALABLECF_GPU_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - name: Inspect CUDA runtime
+        shell: powershell
+        run: |
+          nvidia-smi
+          if (-not (Test-Path -LiteralPath $env:SCALABLECF_GPU_PYTHON)) {
+            throw "SCALABLECF_GPU_PYTHON is not configured on the runner"
+          }
+          if (-not (Test-Path -LiteralPath $env:SCALABLECF_GPU_PATH)) {
+            throw "SCALABLECF_GPU_PATH is not configured on the runner"
+          }
+      - name: Install R dependencies and package
+        shell: Rscript {0}
+        run: |
+          install.packages(c(
+            "codetools", "data.table", "Hmisc", "quantreg", "reticulate",
+            "survival"
+          ))
+          status <- system2(
+            file.path(R.home("bin"), "R"),
+            c("CMD", "INSTALL", shQuote(normalizePath(".", winslash = "/")))
+          )
+          if (!identical(status, 0L)) {
+            stop("R CMD INSTALL failed with status ", status)
+          }
+      - name: Run real-device CUDA parity suite
+        shell: Rscript {0}
+        run: tests/gpu_backend.R
+      - name: Record runtime
+        shell: powershell
+        run: |
+          & $env:SCALABLECF_GPU_PYTHON -c "import sys,numpy,cupy; print(sys.version); print('numpy',numpy.__version__); print('cupy',cupy.__version__); print(cupy.cuda.runtime.getDeviceProperties(0)['name'])"

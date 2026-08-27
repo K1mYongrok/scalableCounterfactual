@@ -1,0 +1,9 @@
+citHeader("To cite scalableCounterfactual in publications, use:")
+
+bibentry(
+  bibtype = "Manual",
+  title = "scalableCounterfactual: Scalable Counterfactual Distribution and Quantile Decomposition",
+  author = person("Yongrok", "Kim"),
+  year = "2026",
+  note = "R package version 1.0.0"
+)

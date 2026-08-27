@@ -1,0 +1,14 @@
+component,native_files,relationship,primary_reference,upstream_software
+counterfactual_decomposition,R/decomposition_engine.R|R/bootstrap.R|R/functional_inference.R,method,doi:10.3982/ECTA10582,Counterfactual 1.2
+quantile_regression,R/solver_qr.R|R/model_qr.R,delegated,doi:10.2307/1913643,quantreg
+preprocessed_qr,R/solver_qr.R,delegated,doi:10.1214/ss/1030037960,quantreg
+barrodale_roberts_qr,R/solver_qr.R,delegated,doi:10.1145/355616.361024,quantreg
+onestep_qr_process,R/solver_qr.R|R/bootstrap.R,transcribed,doi:10.1007/s00181-020-01898-0,bmelly/Stata qrprocess.ado 1.1.3 commit ec56830ef9c84ce54411ad59c5ce94535847d9df
+censored_quantile_regression,R/model_cqr.R,method,doi:10.1198/016214502388618663,quantreg exact QR stages
+distribution_regression,R/model_dr.R|R/model_location.R,method,doi:10.3982/ECTA10582,stats|fastglm|speedglm
+cox_distribution,R/model_cox.R,delegated,doi:10.1111/j.2517-6161.1972.tb00899.x,survival
+kaplan_meier_quantiles,R/model_cox.R,method,doi:10.1080/01621459.1958.10501452,survival conventions
+quantile_rearrangement,R/marginal_distribution.R,method,doi:10.3982/ECTA7880,none
+xy_preprocess_bootstrap,R/bootstrap.R,delegated,quantreg documentation,quantreg::boot.rq.pxy
+cuda_admm,R/gpu_backend.R|inst/python/scalablecf_cuda.py,package_specific,doi:10.1561/2200000016,CuPy
+cuda_marginalization,R/gpu_backend.R|inst/python/scalablecf_cuda.py,package_specific,doi:10.3982/ECTA10582,CuPy

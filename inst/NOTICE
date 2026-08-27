@@ -1,0 +1,68 @@
+Third-party algorithm attribution
+=================================
+
+The complete component-to-paper and component-to-software mapping is in
+inst/provenance/METHODS.md and its machine-readable companion methods.csv.
+That inventory distinguishes a statistical-method reference, delegated
+numerical fitting, and translated source code. Only the one-step implementation
+described below is a source translation.
+
+The one-step quantile-regression process implementation in R/solver_qr.R
+is based on the algorithm and MIT-licensed Stata/Mata implementation in the
+bmelly/Stata qrprocess project:
+
+  https://github.com/bmelly/Stata
+  https://github.com/bmelly/Stata/blob/main/qrprocess.ado
+
+The public `onestep` point and bootstrap backends specifically transcribe
+`rq_1step()` (source lines 2271-2359) and `rq_boot_1step()` (source lines
+2362-2455) from qrprocess 1.1.3, frozen at commit:
+
+  ec56830ef9c84ce54411ad59c5ce94535847d9df
+
+The native R implementation uses R/quantreg numerical primitives in place of
+Mata's exact solvers and `luinv()`. Algorithmic compatibility is intended;
+cross-language bitwise identity is not claimed.
+
+The Stata-compatible weighted-quantile helper follows the default type-2
+definition documented and implemented by Ben Jann's MIT-licensed moremata
+project:
+
+  https://github.com/benjann/moremata
+
+MIT License
+
+Copyright (c) 2022 bmelly
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Reference:
+Chernozhukov, V., Fernandez-Val, I., and Melly, B. (2020). Fast Algorithms
+for the Quantile Regression Process. Empirical Economics.
+
+The QR residual-sign bootstrap preprocessing engine in R/bootstrap.R follows
+the algorithm implemented by quantreg::boot.rq.pxy. The quantreg package is
+distributed under GPL (>= 2), which is compatible with this package's
+GPL (>= 2) license:
+
+  https://cran.r-project.org/package=quantreg
+
+The exact BR, FN, preprocessing, and multi-quantile QR paths call public
+functions from quantreg. No quantreg source code is copied into this package.
+Cox fitting calls survival::coxph.fit(); no survival source code is copied.
