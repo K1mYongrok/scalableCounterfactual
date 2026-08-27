@@ -33,8 +33,7 @@ jobs:
           extra-packages: any::rcmdcheck
           needs: check
       - name: Release preflight
-        shell: Rscript {0}
-        run: tools/release_check.R
+        run: Rscript tools/release_check.R
       - name: Check
         shell: Rscript {0}
         run: |
