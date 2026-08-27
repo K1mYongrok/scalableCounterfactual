@@ -6,7 +6,6 @@ cross-sections.
 
 ## Start here
 
-- Korean installation and folder guide: [`GETTING_STARTED_KO.md`](GETTING_STARTED_KO.md)
 - Public repository: <https://github.com/K1mYongrok/scalableCounterfactual>
 - Self-contained example: `inst/examples/quick_start.R`
 - Architecture: `inst/doc/ARCHITECTURE.md`
