@@ -11,12 +11,13 @@
 - [x] Run `R CMD check` on a clean source tarball.
 - [x] Run the optional CUDA parity suite on a real NVIDIA device.
 - [ ] Run the optional Stata cross-language parity test and archive its output.
-- [ ] Run CPU CI on Windows, Linux, and macOS.
+- [x] Run CPU CI on Windows, Linux, and macOS.
+- [x] Complete a separate end-to-end point-estimation run on macOS.
 - [ ] Run the self-hosted CUDA CI workflow.
 - [x] Review simulation bias/coverage and generic solver benchmark reports.
 - [ ] Run publication-grade coverage validation with a larger outer loop and
       at least 199 bootstrap draws.
-- [x] Install the final 0.15.0 candidate tarball into the analysis R library.
+- [x] Install the final 1.0.0 tarball into the analysis R library.
 - [x] Record the final 1.0.0 tarball hash in the external release bundle.
 
 ## Release evidence

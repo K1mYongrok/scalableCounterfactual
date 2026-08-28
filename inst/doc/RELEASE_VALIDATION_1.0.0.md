@@ -1,6 +1,6 @@
 # Release validation for 1.0.0
 
-Version 1.0.0 was built and checked locally on 2026-08-27 with R 4.5.2 on
+Version 1.0.0 was built and checked locally on 2026-08-28 with R 4.5.2 on
 64-bit Windows. The package author and maintainer are Yongrok Kim, and the
 source package includes a machine-readable `inst/CITATION` entry.
 
@@ -18,6 +18,14 @@ The first aborted check was caused by inherited `LC_ALL=C.UTF-8` and
 this Windows R installation. Removing those shell variables restored the
 native `Korean_Korea.utf8` locale and the same tarball passed without warnings
 or errors. This was an execution-environment issue, not a package failure.
+
+## Cross-platform CPU evidence
+
+The public GitHub Actions `R-CMD-check` workflow completed successfully on
+Windows, Ubuntu, and macOS for commit `4281e77`. A separate end-to-end
+point-estimation run also completed successfully on macOS. Solver-specific
+metadata were not archived for that application run, so it is recorded as an
+application-level smoke check rather than exhaustive solver-parity evidence.
 
 ## Inherited numerical evidence
 
@@ -38,7 +46,6 @@ The following evidence remains appropriate before making broader public or
 methodological claims:
 
 - licensed cross-language execution of the optional Stata parity harness;
-- remote CPU CI execution on Windows, Linux, and macOS;
 - execution of the self-hosted CUDA CI workflow; and
 - a publication-grade Monte Carlo coverage study with larger outer and
   bootstrap replication counts.
