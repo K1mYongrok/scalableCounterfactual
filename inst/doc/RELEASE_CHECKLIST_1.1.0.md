@@ -18,7 +18,7 @@
 - [x] Run `R CMD check --as-cran --no-manual` on a clean 1.1.0 source tarball.
 - [x] Run the complete CPU regression suite from an isolated installed library.
 - [x] Run the CUDA parity suite on a real NVIDIA device using the final source.
-- [ ] Confirm the public CPU CI matrix on Windows, Linux, and macOS.
+- [x] Confirm the public CPU CI matrix on Windows, Linux, and macOS.
 - [x] Create and review the final source tarball and SHA-256 before tagging.
 - [x] Regenerate and visually inspect `release/scalableCounterfactual-reference.pdf`
       from the final 1.1.0 source.

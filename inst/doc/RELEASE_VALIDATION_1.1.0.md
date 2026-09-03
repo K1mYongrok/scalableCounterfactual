@@ -79,10 +79,17 @@ numerical consistency; they are not publication-quality speed benchmarks.
   `release/` directory. That directory is intentionally excluded from the
   source package and Git repository.
 
+## Public CPU CI
+
+GitHub Actions run
+[`33806314016`](https://github.com/K1mYongrok/scalableCounterfactual/actions/runs/33806314016)
+completed successfully for source commit `199a994` on Windows, Ubuntu Linux,
+and macOS with the release R version. This matrix reran the package preflight,
+installation, examples, and packaged regression tests independently on all
+three platforms.
+
 ## Remaining external gates
 
-- Public GitHub Actions CPU jobs must pass on Windows, Linux, and macOS after
-  the final source is pushed.
 - The Stata parity harness remains optional and was not run locally because no
   Stata executable was configured. No cross-language numerical-equivalence
   claim is made without that evidence.
