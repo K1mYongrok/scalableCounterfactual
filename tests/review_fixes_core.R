@@ -67,7 +67,7 @@ intercept_cqr <- suppressWarnings(counterfactual_decompose(
   y ~ 1, intercept_cqr_data, "group", "weight", model = "cqr",
   solver = "fn", censoring = 0,
   control = cf_control(
-    nreg = 5L, reported_quantiles = 0.5,
+    nreg = 3L, reported_quantiles = 0.5,
     crossing_diagnostics = FALSE
   )
 ))

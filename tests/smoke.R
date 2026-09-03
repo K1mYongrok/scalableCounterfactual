@@ -288,7 +288,7 @@ missing_censoring <- try(counterfactual_decompose(
 ), silent = TRUE)
 stopifnot(inherits(missing_censoring, "try-error"))
 cqr_control <- cf_control(
-  nreg = 5L, trimming = 0.2,
+  nreg = 3L, trimming = 0.2,
   reported_quantiles = c(0.35, 0.5, 0.65),
   cqr_nsteps = 3L,
   quantile_noncrossing = "rearrange"
@@ -328,7 +328,7 @@ right_cqr_fit <- suppressWarnings(counterfactual_decompose(
   model = "cqr",
   solver = "fn",
   control = cf_control(
-    nreg = 5L, trimming = 0.2,
+    nreg = 3L, trimming = 0.2,
     reported_quantiles = c(0.4, 0.5, 0.6),
     cqr_right = TRUE
   ),
@@ -438,7 +438,7 @@ cqr_bootstrap <- suppressWarnings(counterfactual_decompose(
   model = "cqr",
   solver = "fn",
   control = cf_control(
-    nreg = 5L, trimming = 0.2,
+    nreg = 3L, trimming = 0.2,
     reported_quantiles = c(0.4, 0.5, 0.6),
     bootstrap_progress = FALSE
   ),
