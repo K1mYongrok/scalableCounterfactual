@@ -82,8 +82,8 @@ numerical consistency; they are not publication-quality speed benchmarks.
 ## Public CPU CI
 
 GitHub Actions run
-[`33806314016`](https://github.com/K1mYongrok/scalableCounterfactual/actions/runs/33806314016)
-completed successfully for source commit `199a994` on Windows, Ubuntu Linux,
+[`33808346987`](https://github.com/K1mYongrok/scalableCounterfactual/actions/runs/33808346987)
+completed successfully for source commit `4f37ecb` on Windows, Ubuntu Linux,
 and macOS with the release R version. This matrix reran the package preflight,
 installation, examples, and packaged regression tests independently on all
 three platforms.
