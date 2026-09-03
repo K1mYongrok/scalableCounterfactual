@@ -273,14 +273,17 @@ stopifnot(all(
   ] == 0
 ))
 
-latent_cqr <- 0.8 + 0.2 * group + 0.7 * x1 - 0.2 * x2 + rnorm(n, sd = 0.7)
+cqr_x2 <- rnorm(n)
+latent_cqr <- 0.8 + 0.2 * group + 0.7 * x1 - 0.2 * cqr_x2 +
+  rnorm(n, sd = 0.7)
 censoring_point <- 0
 cqr_data <- transform(
   test_data,
+  cqr_x2 = cqr_x2,
   censored_y = pmax(censoring_point, latent_cqr)
 )
 missing_censoring <- try(counterfactual_decompose(
-  censored_y ~ x1 + x2, cqr_data, "group", "weights",
+  censored_y ~ x1 + cqr_x2, cqr_data, "group", "weights",
   model = "cqr", solver = "fn", control = control
 ), silent = TRUE)
 stopifnot(inherits(missing_censoring, "try-error"))
@@ -291,7 +294,7 @@ cqr_control <- cf_control(
   quantile_noncrossing = "rearrange"
 )
 cqr_fit <- suppressWarnings(counterfactual_decompose(
-  censored_y ~ x1 + x2,
+  censored_y ~ x1 + cqr_x2,
   cqr_data,
   group = "group",
   weights = "weights",
@@ -310,7 +313,7 @@ stopifnot(all(
 ))
 cqr_data$censoring_column <- censoring_point
 prepared_cqr_column <- scalableCounterfactual:::prepare_cf_data(
-  censored_y ~ x1 + x2, cqr_data, "group", "weights",
+  censored_y ~ x1 + cqr_x2, cqr_data, "group", "weights",
   model = "cqr", censoring = "censoring_column"
 )
 stopifnot(all(prepared_cqr_column$censoring0 == censoring_point))
@@ -318,7 +321,7 @@ stopifnot(all(prepared_cqr_column$censoring0 == censoring_point))
 right_limit <- 2
 cqr_data$right_censored_y <- pmin(right_limit, latent_cqr)
 right_cqr_fit <- suppressWarnings(counterfactual_decompose(
-  right_censored_y ~ x1 + x2,
+  right_censored_y ~ x1 + cqr_x2,
   cqr_data,
   group = "group",
   weights = "weights",
@@ -428,7 +431,7 @@ stopifnot(inherits(loc_cuda_dr_error, "try-error"))
 
 cqr_bootstrap_dir <- tempfile("cf_cqr_bootstrap_")
 cqr_bootstrap <- suppressWarnings(counterfactual_decompose(
-  censored_y ~ x1 + x2,
+  censored_y ~ x1 + cqr_x2,
   cqr_data,
   group = "group",
   weights = "weights",
