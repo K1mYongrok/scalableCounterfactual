@@ -42,6 +42,15 @@ benchmark_qr_solvers <- function(
   if (!reference_solver %in% solvers) {
     stop("reference_solver must be included in solvers", call. = FALSE)
   }
+  point_workers_requested <- assert_scalar_integer(
+    point_workers, "point_workers", 1L
+  )
+  point_workers <- min(point_workers_requested, 2L)
+  for (solver in solvers) {
+    validate_execution_parallelism(
+      "qr", solver, control, point_workers_requested
+    )
+  }
   prepared <- prepare_cf_data(formula, data, group, weights)
   if (!is.null(sample_n)) {
     prepared <- subsample_prepared_data(prepared, sample_n, seed)
@@ -107,6 +116,7 @@ benchmark_qr_solvers <- function(
         observations = prepared$n,
         design_columns = ncol(prepared$X0),
         conditional_quantiles = length(control$conditional_quantiles),
+        point_workers_requested = point_workers_requested,
         point_workers = point_workers,
         elapsed_seconds = measured$value$elapsed_seconds,
         measured_wrapper_seconds = measured$elapsed_seconds,
@@ -154,6 +164,7 @@ benchmark_qr_solvers <- function(
         observations = prepared$n,
         design_columns = ncol(prepared$X0),
         conditional_quantiles = length(control$conditional_quantiles),
+        point_workers_requested = point_workers_requested,
         point_workers = point_workers,
         elapsed_seconds = NA_real_,
         measured_wrapper_seconds = NA_real_,
@@ -307,7 +318,7 @@ benchmark_qr_solvers_repeated <- function(
   reference_median <- summary$median_seconds[
     summary$solver == reference_solver
   ]
-  if (length(reference_median) != 1L) {
+  if (length(reference_median) != 1L || !is.finite(reference_median)) {
     stop("reference solver failed in every recorded repetition", call. = FALSE)
   }
   summary$relative_to_reference_median <-

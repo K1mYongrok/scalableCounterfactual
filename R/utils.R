@@ -9,7 +9,7 @@ is_distribution_regression_model <- function(model) {
 }
 
 .datatable.aware <- TRUE
-.cf_output_schema_version <- "1.0"
+.cf_output_schema_version <- "1.1"
 
 `%||%` <- function(x, y) {
   if (is.null(x)) y else x
@@ -177,7 +177,54 @@ normalize_weights <- function(weights) {
   as.numeric(weights) / mean(as.numeric(weights))
 }
 
-weighted_quantile <- function(x, weights, probs, legacy = FALSE) {
+weighted_rank_tolerance <- function(total_weight) {
+  64 * .Machine$double.eps * max(1, abs(as.numeric(total_weight)))
+}
+
+weighted_rank_index <- function(cumulative, target, total_weight) {
+  tolerance <- weighted_rank_tolerance(total_weight)
+  hit <- which(cumulative >= target - tolerance)[1L]
+  if (is.na(hit)) length(cumulative) else hit
+}
+
+weighted_type7_quantile <- function(
+    x, weights, probs, normalization_n = length(x)) {
+  if (length(x) != length(weights)) {
+    stop("x and weights have incompatible sizes", call. = FALSE)
+  }
+  if (!length(x) || any(!is.finite(x))) {
+    stop("x must contain finite values", call. = FALSE)
+  }
+  probs <- as.numeric(probs)
+  if (!length(probs) || any(!is.finite(probs)) ||
+      any(probs < 0 | probs > 1)) {
+    stop("probs must lie between 0 and 1", call. = FALSE)
+  }
+  if (!is.numeric(normalization_n) || length(normalization_n) != 1L ||
+      !is.finite(normalization_n) || normalization_n < 1) {
+    stop("normalization_n must be one finite value >= 1", call. = FALSE)
+  }
+  weights <- normalize_weights(weights) *
+    (as.numeric(normalization_n) / length(weights))
+  ordering <- order(x)
+  ordered_x <- as.numeric(x[ordering])
+  cumulative <- cumsum(weights[ordering])
+  total_positions <- as.numeric(normalization_n)
+  cumulative[[length(cumulative)]] <- total_positions
+  positions <- 1 + (total_positions - 1) * probs
+  low <- pmax(floor(positions), 1)
+  high <- pmin(low + 1, total_positions)
+  target_values <- vapply(c(low, high), function(target) {
+    ordered_x[[weighted_rank_index(cumulative, target, total_positions)]]
+  }, numeric(1L))
+  interpolation <- positions %% 1
+  k <- length(probs)
+  (1 - interpolation) * target_values[seq_len(k)] +
+    interpolation * target_values[k + seq_len(k)]
+}
+
+weighted_quantile <- function(
+    x, weights, probs, legacy = FALSE, normalization_n = length(x)) {
   if (length(x) != length(weights)) {
     stop("x and weights have incompatible sizes", call. = FALSE)
   }
@@ -190,28 +237,128 @@ weighted_quantile <- function(x, weights, probs, legacy = FALSE) {
       normwt = FALSE
     )))
   }
-  weights <- normalize_weights(weights)
-  as.numeric(Hmisc::wtd.quantile(
-    x,
-    weights = weights,
-    probs = probs,
-    na.rm = TRUE,
-    normwt = TRUE
-  ))
+  weighted_type7_quantile(x, weights, probs, normalization_n)
 }
 
 atomic_save_rds <- function(object, path, compress = FALSE) {
+  if (dir.exists(path)) {
+    stop("checkpoint path is an existing directory: ", path, call. = FALSE)
+  }
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   temporary <- paste0(path, ".tmp_", Sys.getpid())
+  backup <- paste0(path, ".bak_", Sys.getpid())
+  committed <- FALSE
   on.exit(if (file.exists(temporary)) unlink(temporary), add = TRUE)
+  on.exit({
+    if (committed && file.exists(backup)) unlink(backup)
+  }, add = TRUE)
   saveRDS(object, temporary, compress = compress)
-  if (file.exists(path) && unlink(path) != 0L) {
-    stop("Could not replace checkpoint: ", path, call. = FALSE)
+  had_existing <- file.exists(path)
+  if (had_existing && !file.rename(path, backup)) {
+    stop("Could not stage the existing checkpoint: ", path, call. = FALSE)
   }
   if (!file.rename(temporary, path)) {
+    restored <- !had_existing || !file.exists(backup) ||
+      file.rename(backup, path)
+    if (!restored) {
+      stop(
+        "Could not create checkpoint or restore its predecessor; preserved ",
+        "the prior checkpoint at: ", backup,
+        call. = FALSE
+      )
+    }
     stop("Could not create checkpoint: ", path, call. = FALSE)
   }
+  committed <- TRUE
+  if (had_existing && file.exists(backup)) unlink(backup)
   invisible(path)
+}
+
+atomic_write_output_files <- function(
+    output_dir, managed_files, writer, required_files = character()) {
+  if (!is.character(output_dir) || length(output_dir) != 1L ||
+      is.na(output_dir) || !nzchar(output_dir)) {
+    stop("output_dir must be one nonempty path", call. = FALSE)
+  }
+  if (!is.function(writer)) stop("writer must be a function", call. = FALSE)
+  managed_files <- unique(as.character(managed_files))
+  required_files <- unique(as.character(required_files))
+  invalid <- function(x) {
+    !nzchar(x) | x %in% c(".", "..") | dirname(x) != "." |
+      grepl("[/\\\\]", x)
+  }
+  if (!length(managed_files) || any(invalid(managed_files)) ||
+      any(invalid(required_files)) ||
+      !all(required_files %in% managed_files)) {
+    stop("managed and required files must be safe base names", call. = FALSE)
+  }
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(output_dir)) {
+    stop("could not create output_dir: ", output_dir, call. = FALSE)
+  }
+  managed_paths <- file.path(output_dir, managed_files)
+  managed_directories <- managed_files[dir.exists(managed_paths)]
+  if (length(managed_directories)) {
+    stop(
+      "managed output path is an existing directory: ",
+      paste(managed_directories, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  stage <- tempfile(".scalablecf-stage-", tmpdir = output_dir)
+  backup <- tempfile(".scalablecf-backup-", tmpdir = output_dir)
+  dir.create(stage)
+  dir.create(backup)
+  committed <- FALSE
+  on.exit({
+    if (dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE)
+    backup_empty <- dir.exists(backup) &&
+      !length(list.files(backup, all.files = TRUE, no.. = TRUE))
+    if ((committed || backup_empty) && dir.exists(backup)) {
+      unlink(backup, recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
+  writer(stage)
+  missing_required <- required_files[!file.exists(file.path(stage, required_files))]
+  if (length(missing_required)) {
+    stop(
+      "staged output is missing required files: ",
+      paste(missing_required, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  staged_files <- managed_files[file.exists(file.path(stage, managed_files))]
+  if (any(dir.exists(file.path(stage, staged_files)))) {
+    stop("writer produced a directory where a file was required", call. = FALSE)
+  }
+  existing_files <- managed_files[file.exists(file.path(output_dir, managed_files))]
+  moved_old <- character()
+  moved_new <- character()
+  rollback <- function() {
+    if (length(moved_new)) {
+      unlink(file.path(output_dir, moved_new), force = TRUE)
+    }
+    for (name in rev(moved_old)) {
+      file.rename(file.path(backup, name), file.path(output_dir, name))
+    }
+  }
+  for (name in existing_files) {
+    if (!file.rename(file.path(output_dir, name), file.path(backup, name))) {
+      rollback()
+      stop("could not stage existing output file: ", name, call. = FALSE)
+    }
+    moved_old <- c(moved_old, name)
+  }
+  for (name in staged_files) {
+    if (!file.rename(file.path(stage, name), file.path(output_dir, name))) {
+      rollback()
+      stop("could not commit staged output file: ", name, call. = FALSE)
+    }
+    moved_new <- c(moved_new, name)
+  }
+  committed <- TRUE
+  if (dir.exists(backup)) unlink(backup, recursive = TRUE, force = TRUE)
+  invisible(output_dir)
 }
 
 object_md5 <- function(object) {

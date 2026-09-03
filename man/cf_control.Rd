@@ -49,14 +49,16 @@ cf_control(
   gpu_qr_rho = 1,
   gpu_qr_maxit = 5000L,
   gpu_qr_tolerance = 1e-06,
-  gpu_qr_allow_nonconvergence = FALSE
+  gpu_qr_allow_nonconvergence = FALSE,
+  dr_noncrossing = c("cummax", "rearrange", "isotonic", "none")
 )
 }
 \arguments{
 \item{nreg}{Number of conditional quantile regressions or distribution
 regression thresholds.}
 
-\item{trimming}{QR tail trimming fraction.}
+\item{trimming}{QR tail trimming fraction. CQR, location, and location-scale
+models retain the full midpoint grid.}
 
 \item{reported_quantiles}{Quantiles of the marginal distributions to report.}
 
@@ -150,9 +152,9 @@ returning the final event time.}
 and `lpm`: robust base-R QR, Cholesky, RcppEigen-backed `fastglm`, or
 `auto` (currently QR for backward-compatible numerical robustness).}
 
-\item{dr_backend}{Binary-response backend for logit, probit, and cloglog distribution
-regression: base-R `glm`, `fastglm`, `speedglm`, or `auto` (currently
-`fastglm` when installed and base-R GLM otherwise).}
+\item{dr_backend}{Binary-response backend for logit, probit, and cloglog
+distribution regression: base-R `glm`, `fastglm`, `speedglm`, CUDA, or
+`auto` (currently `fastglm` when installed and base-R GLM otherwise).}
 
 \item{dr_workers}{Workers used across distribution-regression thresholds.
 This execution layer cannot be combined with group-level or
@@ -191,6 +193,14 @@ default. `float32` is experimental.}
 \item{gpu_qr_allow_nonconvergence}{Allow an experimental `cuda_admm` result
 that reached its iteration limit to be returned with diagnostics. The
 default stops before decomposition or inference.}
+
+\item{dr_noncrossing}{Distribution-regression CDF monotonicity correction.
+`cummax` preserves the version 1.0 running-maximum rule. `rearrange`
+applies the increasing rearrangement used by `Counterfactual` 1.2,
+`isotonic` applies an
+equal-weight isotonic projection over outcome thresholds, and `none`
+disables monotonicity correction. All policies enforce `[0, 1]`
+probability bounds before inversion.}
 }
 \value{
 A validated control list.

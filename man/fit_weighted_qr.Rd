@@ -13,7 +13,8 @@ fit_weighted_qr(
   precondition = TRUE,
   onestep_first_solver = c("auto", "br", "fn", "pfn"),
   onestep_bandwidth = c("hall_sheather", "bofinger"),
-  gpu_control = NULL
+  gpu_control = NULL,
+  frequency = NULL
 )
 }
 \arguments{
@@ -26,7 +27,7 @@ fit_weighted_qr(
 \item{taus}{Sorted conditional quantiles.}
 
 \item{solver}{One of `br`, `fn`, `pfn`, `qfnb`, `pfnb`, `proqreg`,
-`profn`, `onestep`, or `auto`.}
+`profn`, `onestep`, the experimental `cuda_admm`, or `auto`.}
 
 \item{precondition}{Apply an invertible design preconditioner before fitting
 and transform coefficients back to the original units.}
@@ -38,6 +39,12 @@ process. `auto` uses `br` below 100,000 observations and `pfn` otherwise.}
 
 \item{gpu_control}{Internal `cf_control` object required by the experimental
 `cuda_admm` solver.}
+
+\item{frequency}{Optional positive integer row multiplicities. Case weights
+are multiplied by these frequencies. This is useful when a resample is
+represented without physically duplicating rows. The experimental
+`onestep` and experimental `cuda_admm` backends expand non-unit frequencies
+so that their numerical paths match explicit row replication.}
 }
 \value{
 A standardized QR fit list.

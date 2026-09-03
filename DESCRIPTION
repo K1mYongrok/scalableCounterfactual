@@ -1,7 +1,7 @@
 Package: scalableCounterfactual
 Type: Package
 Title: Scalable Counterfactual Distribution and Quantile Decomposition
-Version: 1.0.0
+Version: 1.1.0
 Authors@R: person("Yongrok", "Kim", email = "k3644366@sogang.ac.kr", role = c("aut", "cre"))
 Description: Provides modular estimators for counterfactual distributions and
     quantile decompositions following Chernozhukov, Fernandez-Val, and Melly
@@ -30,7 +30,7 @@ Imports:
     graphics,
     Hmisc,
     parallel,
-    quantreg,
+    quantreg (>= 5.61),
     survival,
     stats,
     utils

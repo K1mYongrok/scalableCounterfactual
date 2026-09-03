@@ -3,7 +3,10 @@ citHeader("To cite scalableCounterfactual in publications, use:")
 bibentry(
   bibtype = "Manual",
   title = "scalableCounterfactual: Scalable Counterfactual Distribution and Quantile Decomposition",
-  author = person("Yongrok", "Kim"),
+  author = person(
+    "Yongrok", "Kim", email = "k3644366@sogang.ac.kr"
+  ),
   year = "2026",
-  note = "R package version 1.0.0"
+  note = paste("R package version", meta$Version),
+  url = "https://github.com/K1mYongrok/scalableCounterfactual"
 )

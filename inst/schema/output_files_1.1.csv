@@ -1,0 +1,11 @@
+file,requirement,condition
+decomposition.csv,required,always
+distribution_diagnostics.csv,required,always
+point_resources.csv,required,always
+marginalization_diagnostics.csv,required,always
+run_metadata.csv,required,always
+fit.rds,required,always
+bootstrap_resources.csv,conditional,bootstrap results exist
+bootstrap_failures.csv,conditional,one or more bootstrap attempts failed
+functional_effect_tests.csv,conditional,functional tests exist
+quantile_crossing_diagnostics.csv,conditional,crossing diagnostics were requested and produced

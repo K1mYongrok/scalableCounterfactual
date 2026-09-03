@@ -122,10 +122,14 @@ make_weighted_linear_solver <- function(X, weights, backend = "auto") {
 }
 
 fit_location_model <- function(
-    X, y, weights, taus, linear_backend = "auto") {
+    X, y, weights, taus, linear_backend = "auto",
+    quantile_frequency = rep(1, length(y))) {
   solver <- make_weighted_linear_solver(X, weights, linear_backend)
   fitted <- solver$fit(y)
-  residual_quantiles <- weighted_quantile(fitted$residuals, weights, taus)
+  residual_quantiles <- weighted_quantile(
+    fitted$residuals, weights, taus,
+    normalization_n = sum(quantile_frequency)
+  )
   structure(list(
     model = "loc",
     coefficients = fitted$coefficients,
@@ -138,7 +142,8 @@ fit_location_model <- function(
 }
 
 fit_location_scale_model <- function(
-    X, y, weights, taus, linear_backend = "auto") {
+    X, y, weights, taus, linear_backend = "auto",
+    quantile_frequency = rep(1, length(y))) {
   solver <- make_weighted_linear_solver(X, weights, linear_backend)
   location_fit <- solver$fit(y)
   residuals <- location_fit$residuals
@@ -147,7 +152,10 @@ fit_location_scale_model <- function(
   scale_fit <- solver$fit(scale_outcome)
   fitted_scale <- sqrt(exp(drop(X %*% scale_fit$coefficients)))
   standardized <- residuals / pmax(fitted_scale, sqrt(floor_value))
-  residual_quantiles <- weighted_quantile(standardized, weights, taus)
+  residual_quantiles <- weighted_quantile(
+    standardized, weights, taus,
+    normalization_n = sum(quantile_frequency)
+  )
   structure(list(
     model = "locsca",
     location_coefficients = location_fit$coefficients,

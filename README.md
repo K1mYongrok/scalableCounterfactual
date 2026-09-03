@@ -9,7 +9,9 @@ cross-sections.
 - Public repository: <https://github.com/K1mYongrok/scalableCounterfactual>
 - Self-contained example: `inst/examples/quick_start.R`
 - Architecture: `inst/doc/ARCHITECTURE.md`
-- Release validation: `inst/doc/RELEASE_VALIDATION_1.0.0.md`
+- Current release validation: `inst/doc/RELEASE_VALIDATION_1.1.0.md`
+- Prior release validation: `inst/doc/RELEASE_VALIDATION_1.0.0.md` (historical
+  evidence for version 1.0; it is not a validation claim for 1.1)
 
 The R package is application-neutral. Project-specific wage-worker cleaning,
 urban-rural definitions, and empirical specifications remain outside this
@@ -43,7 +45,7 @@ only when its estimated size is below `marginal_matrix_max_mb`. Larger runs use
 a chunked weighted-histogram selection algorithm. It scans bounded row chunks,
 isolates only the bins containing the requested weighted order statistics, and
 performs exact weighted selection within those bins. The point estimates retain
-the same finite-draw weighted-quantile definition as the matrix implementation.
+the same stable weighted type-7 definition as the matrix implementation.
 The resolved method, pass count, histogram size, candidate count, and avoided
 matrix size are recorded for each fitted/counterfactual distribution.
 
@@ -87,13 +89,17 @@ No failed solver is silently replaced without metadata.
 `model` and `solver` are independent options. A QR solver is used by `qr` and
 by each selected-sample refit in `cqr`. CQR accepts `br`, `fn`, `pfn`, `qfnb`,
 `pfnb`, or `auto`; process-only approximations are deliberately excluded.
+`trimming` changes only the QR conditional grid. CQR, `loc`, and `locsca`
+always use the complete midpoint grid `(j - 0.5) / nreg` because dropping its
+tails would change those model definitions.
 
 Non-QR computation is also backend-neutral. `loc`, `locsca`, and `lpm` accept
 `linear_backend = "qr"`, `"chol"`, or `"fastglm"`; the first two reuse one
 weighted factorization across responses. `logit`, `probit`, and `cloglog` accept
-`dr_backend = "glm"`, `"fastglm"`, or `"speedglm"`. `fastglm` is the optional
-RcppEigen-backed path. `auto` uses `fastglm` for distribution regression when
-installed and otherwise base-R GLM; the conservative linear default is QR.
+`dr_backend = "glm"`, `"fastglm"`, `"speedglm"`, or the optional `"cuda"`
+process backend. `fastglm` is the optional RcppEigen-backed path. `auto` uses
+`fastglm` for distribution regression when installed and otherwise base-R
+GLM; the conservative linear default is QR.
 Inspect these mappings with `conditional_backend_registry()`.
 
 Sequential distribution regression can warm-start neighboring thresholds.
@@ -102,6 +108,24 @@ disabled. Threshold parallelism cannot be nested inside group-level or
 bootstrap-replication parallelism. An invertible weighted-design
 preconditioner is enabled by default for logit/probit/cloglog and coefficients are
 returned in their original units.
+
+For logit, probit, and cloglog, built-in CPU and CUDA fits supplement backend
+convergence flags with a scale-aware signed-margin diagnostic for complete and
+quasi-complete separation. A separated fit is reported as a boundary fit; an
+isolated extreme fitted probability is not sufficient by itself. CQR retries
+an invalid first-stage backend with base-R GLM and stops if that fit also
+remains nonconverged or separated.
+
+Separately fitted distribution-regression thresholds can yield a nonmonotone
+marginal CDF in finite samples. The 1.x-compatible default
+`dr_noncrossing = "cummax"` preserves the running-maximum rule used in version
+1.0. Set it to `"rearrange"` for the increasing rearrangement used by
+`Counterfactual` 1.2, `"isotonic"` for an equal-weight isotonic projection, or
+`"none"` to disable monotonicity correction. Every policy still enforces the
+probability bounds `[0, 1]` before inversion. Marginalization diagnostics record the raw crossing
+count and largest violation, corrected crossing count, number of out-of-bounds
+values (`dr_out_of_bounds_values`), largest bound correction
+(`dr_max_bound_adjustment`), and largest total correction.
 
 Point-estimate QR and CQR runs also diagnose adjacent conditional-quantile crossing on
 the reference design, the reference structure evaluated on comparison
@@ -118,7 +142,12 @@ CQR follows the multi-step selection/refitting estimator: a weighted logit
 model first estimates the uncensoring probability, and exact weighted QR fits
 are iteratively restricted to observations whose predicted latent quantiles
 clear the censoring point. `censoring` may be a column, vector, or scalar;
-`cqr_right = TRUE` handles right censoring by sign reversal.
+`cqr_right = TRUE` handles right censoring by sign reversal. The first-stage
+logit uses the selected `dr_backend`; a nonconverged or boundary fit is retried
+with base-R `glm`. Estimation stops if that fallback remains nonconverged or on
+the probability boundary. Group-specific metadata retain the initial and final
+backend, fallback indicator, convergence and boundary status, iteration count,
+and accumulated warnings.
 
 Cox fits use Breslow ties and optional `event` status. Marginal Cox quantiles
 are inverted with a bounded-memory binary search over the estimated baseline
@@ -128,16 +157,22 @@ requested quantile lies above the identified Kaplan--Meier CDF, the safe default
 `cox_boundary = "na"` returns `NA`; `"error"` stops the run and `"cap"` retains
 the former last-event-time behavior. Unidentified quantiles are excluded from
 bootstrap and functional inference rather than treated as estimates.
+Every model formula must include an intercept. All non-Cox models accept an
+intercept-only formula, subject to the CQR overlap and identified-quantile
+conditions; this estimates an unconditional two-group comparison with a zero
+composition component. Cox regression requires at least one non-intercept
+covariate.
 
 These backends preserve the corresponding unpenalized model objective.
 Regularized `glmnet` fits are deliberately not labelled as solver backends,
 because a penalty changes the estimator rather than only its computation.
 
 Before estimation, both groups are forced to use one common, full-rank design
-matrix. Columns with no variation in either group, or columns aliased in either
-group, are removed from both groups and recorded as
-`dropped_design_columns` in the run metadata. Solver failures are retained as
-benchmark results rather than silently replaced by another solver.
+matrix. A scale-aware maximum common independent-column calculation retains as
+many formula columns as possible while requiring full rank in each group.
+Columns that cannot be jointly identified are removed from both groups and
+recorded as `dropped_design_columns` in the run metadata. Solver failures are
+retained as benchmark results rather than silently replaced by another solver.
 
 By default, QR fits also apply an invertible design preconditioner internally
 and transform coefficients back to their original units. This changes numerical
@@ -149,28 +184,45 @@ distribution being evaluated. This makes results invariant to a common
 rescaling of sampling weights. It is an intentional numerical correction to
 the default `Hmisc::wtd.quantile` behavior used by `Counterfactual` 1.2; strict
 source-code output parity is therefore not expected in small samples even when
-the conditional BR coefficients are identical.
+the conditional BR coefficients are identical. The default rank calculation
+agrees with `Hmisc::wtd.quantile(normwt = TRUE)` when cumulative weighted ranks
+are numerically distinct. It evaluates those ranks directly so that weights
+far below machine precision do not trigger `approx()` tie collapsing; in such
+extreme dynamic-range cases, 1.1 results can differ from the numerically
+unstable 1.0/Hmisc output while preserving the intended weighted type-7 rule.
+For empirical and counterfactual bootstrap schemes, repeated sampled rows are
+stored once with integer frequency weights. The type-7 effective sample size
+and the location/CQR selection quantiles and sample-size gates retain the
+original resample size, so this compressed representation is numerically
+equivalent to explicitly duplicating the sampled rows. Multiplier bootstrap
+weights keep the ordinary fixed-row normalization.
 
 ## Install
 
-From the project root:
+From the cloned repository root:
 
 ```powershell
-R CMD INSTALL scalableCounterfactual
+R CMD INSTALL .
 ```
 
-The optional CUDA environment used for release validation is recorded in
-`inst/python/requirements-cuda.txt`. A project-local installation can be
-created with:
+The optional CUDA dependencies are recorded in
+`inst/python/requirements-cuda.txt`. Install them in an isolated project-local
+virtual environment rather than into a shared user site or `--target`
+directory:
 
 ```powershell
-python -m pip install --target tmp/cuda_python `
-  -r scalableCounterfactual/inst/python/requirements-cuda.txt
+py -3.12 -m venv tmp/cuda-venv
+$env:PYTHONNOUSERSITE = "1"
+tmp/cuda-venv/Scripts/python.exe -m pip install `
+  -r inst/python/requirements-cuda.txt
 ```
 
 The exact Windows/Python 3.12 package set used for validation is retained in
-`requirements-cuda-windows-py312.lock`. CUDA is optional; the CPU package does
-not import Python or CuPy.
+`inst/python/requirements-cuda-windows-py312.lock`. Pass the virtual
+environment's Python executable as `gpu_python` and its `Lib/site-packages`
+directory as `gpu_python_path`. Keep `PYTHONNOUSERSITE=1` set before R
+initializes Python. CUDA is optional; the CPU package does not import Python or
+CuPy.
 
 ## Executable quick start
 
@@ -244,7 +296,7 @@ binary group column, and optional sampling-weight column. Dataset preparation
 and variable construction remain the caller's responsibility.
 
 ```powershell
-Rscript scalableCounterfactual/inst/scripts/cfdecomp.R `
+Rscript inst/scripts/cfdecomp.R `
   --data data/analysis_sample.csv `
   --formula "log_outcome ~ age + I(age^2) + education + occupation" `
   --group group_indicator `
@@ -263,7 +315,7 @@ Rscript scalableCounterfactual/inst/scripts/cfdecomp.R `
 For a distribution-regression run, for example:
 
 ```powershell
-Rscript scalableCounterfactual/inst/scripts/cfdecomp.R `
+Rscript inst/scripts/cfdecomp.R `
   --data data/analysis_sample.csv `
   --formula "log_outcome ~ age + I(age^2) + education + occupation" `
   --group group_indicator `
@@ -273,6 +325,7 @@ Rscript scalableCounterfactual/inst/scripts/cfdecomp.R `
   --dr-workers 1 `
   --dr-warm-start true `
   --dr-precondition true `
+  --dr-noncrossing rearrange `
   --output output/counterfactual_logit
 ```
 
@@ -286,11 +339,15 @@ refit for `profn` and `proqreg`, and `"onestep"` reuses the point-estimate
 inverse Jacobians. `"auto"` selects a compatible specialized engine. The
 `xy_preprocess` engine does not implement multiplier draws. Point-estimation
 and bootstrap worker counts remain separate options.
+The requested point count is retained in metadata, while the effective count
+is capped at two because there are exactly two group-specific conditional
+fits. With multiple bootstrap workers, the effective within-draw point count
+is one to prevent nested process parallelism.
 
 Example of the Stata-compatible path:
 
 ```powershell
-Rscript scalableCounterfactual/inst/scripts/cfdecomp.R `
+Rscript inst/scripts/cfdecomp.R `
   --data data/analysis_sample.csv `
   --formula "log_outcome ~ age + I(age^2) + education + occupation" `
   --group group_indicator `
@@ -319,7 +376,7 @@ per process, convergence flags, and numerical differences from a selected
 reference solver.
 
 ```powershell
-Rscript scalableCounterfactual/inst/scripts/cfbenchmark.R `
+Rscript inst/scripts/cfbenchmark.R `
   --data data/analysis_sample.csv `
   --formula "log_outcome ~ age + I(age^2) + education + occupation" `
   --group group_indicator `
@@ -333,12 +390,17 @@ Rscript scalableCounterfactual/inst/scripts/cfbenchmark.R `
 ```
 
 The benchmark command writes repeat-level results to the requested path and a
-second `_summary.csv` file containing median times and relative speed.
+second `_summary.csv` file containing median times and relative speed. The two
+files are staged and committed as one managed output set, so a failed write
+does not leave a new raw file paired with an old summary.
 
 Use `benchmark_conditional_backends()` for frozen-design comparisons of
 linear and distribution-regression backends. It records resolved backends,
 errors, warnings, time, R heap, and maximum effect differences from a chosen
-reference backend.
+reference backend. When groups have different numbers of distinct outcome
+thresholds, group-specific grid sizes and effective threshold-worker counts
+are reported; the single combined field is `NA` rather than implying that the
+two groups used the same process.
 
 The ordinary benchmark's peak-memory field is the peak R heap reported by
 `gc()`. `benchmark_qr_scaling()` additionally samples fresh-process RSS from
@@ -375,7 +437,7 @@ quantile at a time.
 For publication-quality scaling measurements, use the isolated runner:
 
 ```powershell
-Rscript scalableCounterfactual/inst/scripts/cfscaling.R `
+Rscript inst/scripts/cfscaling.R `
   --data data/analysis_sample.csv `
   --formula "log_outcome ~ age + I(age^2) + education + occupation" `
   --group group_indicator `
@@ -394,14 +456,19 @@ adds sampled process RSS to the ordinary in-session R-heap measurement and
 avoids memory retained by a previously run solver. With `point_workers > 1`,
 RSS refers to the parent worker process only; use one point worker for a clean
 solver-memory comparison. The checkpoint is atomically updated after every
-recorded solver run, so an interrupted command resumes completed conditions.
+recorded solver run, so an interrupted command resumes completed conditions in
+the same repetition order. Its identity includes the R, package, BLAS/LAPACK,
+extension, and applicable GPU runtime; stored rows and fit shapes are validated
+before reuse.
 
-Strict source auditing is separate from the recommended default. Setting
-`legacy_qr_shift = TRUE`, `legacy_weighted_quantile = TRUE`,
+Strict source auditing is separate from the recommended default. Retaining the
+1.x-compatible `legacy_qr_shift = TRUE` and setting
+`legacy_weighted_quantile = TRUE`,
 `qr_precondition = FALSE`, and `marginal_method = "matrix"` reproduces the
 scale-sensitive QR path in `Counterfactual` 1.2. The default
 `legacy_weighted_quantile = FALSE` is weight-scale invariant and should remain
-the choice for new empirical work.
+the choice for new empirical work. Setting `legacy_qr_shift = FALSE` removes
+the legacy scalar level shift; it does not change decomposition differences.
 
 ## Custom solvers and model backends
 
@@ -465,14 +532,23 @@ work across interrupted runs. `task_timeout_seconds` is best-effort because
 compiled solvers may not check R interrupts. The same workflow is available
 through `inst/scripts/cfsimulate.R`.
 
+Simulation metadata retain both requested and effective worker counts; the
+effective count cannot exceed the number of tasks. Decomposition and
+simulation output writers stage and validate their required managed files
+before replacing an existing output set. Unrelated files and checkpoint
+subdirectories in the destination are left untouched. The command-line
+adapters reject input, output, summary, and checkpoint path collisions before
+estimation.
+
 ## API and output stability
 
 The fitted object and `run_metadata.csv` record an
-`output_schema_version`. Schema version 1.0 fixes the group direction as group
-1 minus group 0 and defines the required decomposition, diagnostic, metadata,
-resource, and RDS outputs. Additive columns are allowed in minor releases;
-renaming a required output or changing an existing column's meaning requires a
-major release. See `inst/doc/API_STABILITY.md` for the complete policy.
+`output_schema_version`. Schema version 1.1 retains the group direction as
+group 1 minus group 0 and the required 1.0 decomposition columns, and adds DR
+CDF-bound/noncrossing diagnostics and additive run metadata for CQR and GPU
+execution. The 1.0 contracts remain archived as the prior baseline. Renaming a
+required output or changing an existing column's meaning requires a major
+release. See `inst/doc/API_STABILITY.md` for the complete policy.
 
 Approximate `onestep` and experimental `cuda_admm` computation remain clearly
 labelled and are not covered by a claim of exact-solver equivalence. The 1.x
@@ -534,8 +610,9 @@ not fit in device memory.
 CUDA bootstrap runs currently use one R process so that the device is not
 oversubscribed. Every replication uses the selected GPU kernels, while the
 existing checkpoint, retry, and RNG logic remains unchanged. CUDA runtime paths
-and imported Python modules are cached once per Python executable; repeated
-calls do not repeatedly extend `PATH` or `PYTHONPATH`.
+and imported Python modules are cached by normalized Python/runtime paths plus
+the CUDA module's path and content hash; repeated calls do not repeatedly
+extend `PATH` or `PYTHONPATH`.
 
 Backend requests are validated against the model before fitting. For example,
 CUDA DR fitting is available only for logit, probit, and cloglog, and Cox does

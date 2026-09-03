@@ -58,37 +58,109 @@ configure_cuda_runtime_paths <- function(python_path) {
   invisible(NULL)
 }
 
-load_cuda_module <- function(
-    python = NULL, python_path = NULL, module_path = NULL) {
-  key <- paste(
-    python %||% "<default>", python_path %||% "<default-path>",
-    module_path %||% "<bundled>", sep = "|"
-  )
-  if (!is.null(.cf_gpu_state$modules[[key]])) {
-    return(.cf_gpu_state$modules[[key]])
+normalize_cuda_path <- function(path, directory = FALSE) {
+  if (is.null(path)) return(NULL)
+  normalized <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  if (directory && !dir.exists(normalized)) {
+    stop("CUDA Python path is not a directory: ", normalized, call. = FALSE)
   }
+  normalized
+}
+
+cuda_path_key <- function(path) {
+  key <- gsub("\\\\", "/", path)
+  if (.Platform$OS.type == "windows") tolower(key) else key
+}
+
+assert_cuda_status <- function(status) {
+  if (!is.list(status) || length(status$available) != 1L ||
+      !is.logical(status$available)) {
+    stop("CUDA module returned an invalid capability status", call. = FALSE)
+  }
+  if (!isTRUE(status$available)) {
+    warning_text <- paste(as.character(status$runtime_warnings %||% character()),
+                          collapse = "; ")
+    suffix <- if (nzchar(warning_text)) paste0(" [", warning_text, "]") else ""
+    stop(
+      "CUDA backend is unavailable: ", status$error %||% "unknown error", suffix,
+      call. = FALSE
+    )
+  }
+  invisible(status)
+}
+
+import_cuda_module_file <- function(module_path, module_name) {
+  builtins <- reticulate::import_builtins(convert = FALSE)
+  pathlib <- reticulate::import("pathlib", convert = FALSE)
+  sys <- reticulate::import("sys", convert = FALSE)
+  types <- reticulate::import("types", convert = FALSE)
+  module_raw <- types$ModuleType(module_name)
+  reticulate::py_set_attr(module_raw, "__file__", module_path)
+  reticulate::py_set_attr(module_raw, "__package__", "")
+  reticulate::py_set_item(sys$modules, module_name, module_raw)
+  source <- pathlib$Path(module_path)$read_bytes()
+  code <- builtins$compile(source, module_path, "exec")
+  builtins$exec(
+    code, reticulate::py_get_attr(module_raw, "__dict__")
+  )
+  actual_path <- reticulate::py_to_r(
+    reticulate::py_get_attr(module_raw, "__file__")
+  )
+  actual_path <- normalizePath(actual_path, winslash = "/", mustWork = TRUE)
+  if (!identical(cuda_path_key(actual_path), cuda_path_key(module_path))) {
+    stop(
+      "CUDA module identity mismatch: requested ", module_path,
+      " but Python loaded ", actual_path,
+      call. = FALSE
+    )
+  }
+  reticulate::import(module_name, convert = TRUE)
+}
+
+load_cuda_module <- function(
+    python = NULL, python_path = NULL, module_path = NULL,
+    require_available = TRUE) {
   if (!requireNamespace("reticulate", quietly = TRUE)) {
     stop("CUDA requires the optional R package 'reticulate'", call. = FALSE)
+  }
+  python <- normalize_cuda_path(python)
+  python_path <- normalize_cuda_path(python_path, directory = TRUE)
+  if (is.null(module_path)) module_path <- gpu_python_module_path()
+  module_path <- normalize_cuda_path(module_path)
+  module_content_md5 <- unname(tools::md5sum(module_path))
+  identity <- list(
+    python = python %||% "<default>",
+    python_path = python_path %||% "<default-path>",
+    module_path = cuda_path_key(module_path),
+    module_content_md5 = module_content_md5
+  )
+  key <- object_md5(identity)
+  cached <- .cf_gpu_state$modules[[key]]
+  if (!is.null(cached)) {
+    if (isTRUE(require_available)) assert_cuda_status(cached$cuda_status())
+    return(cached)
   }
   configure_cuda_runtime_paths(python_path)
   if (!is.null(python)) reticulate::use_python(python, required = TRUE)
   if (!is.null(python_path)) {
-    reticulate::py_run_string(sprintf(
-      "import sys; p=r'''%s'''; sys.path.insert(0,p) if p not in sys.path else None",
-      normalizePath(python_path, winslash = "/", mustWork = TRUE)
+    sys <- reticulate::import("sys", convert = FALSE)
+    existing <- reticulate::py_to_r(sys$path)
+    existing_key <- vapply(existing, function(value) {
+      cuda_path_key(gsub("\\\\", "/", as.character(value)))
+    }, character(1L))
+    if (!cuda_path_key(python_path) %in% existing_key) {
+      sys$path$insert(0L, python_path)
+    }
+  }
+  module_name <- paste0(
+    "scalablecf_cuda_", object_md5(list(
+      path = cuda_path_key(module_path), content_md5 = module_content_md5
     ))
-  }
-  if (is.null(module_path)) module_path <- gpu_python_module_path()
-  module_path <- normalizePath(module_path, winslash = "/", mustWork = TRUE)
-  module <- reticulate::import_from_path(
-    tools::file_path_sans_ext(basename(module_path)),
-    path = dirname(module_path), convert = TRUE
   )
+  module <- import_cuda_module_file(module_path, module_name)
   status <- module$cuda_status()
-  if (!isTRUE(status$available)) {
-    stop("CUDA backend is unavailable: ", status$error, call. = FALSE)
-  }
   .cf_gpu_state$modules[[key]] <- module
+  if (isTRUE(require_available)) assert_cuda_status(status)
   module
 }
 
@@ -102,12 +174,109 @@ load_cuda_module <- function(
 gpu_backend_status <- function(
     python = NULL, python_path = NULL, module_path = NULL) {
   tryCatch({
-    module <- load_cuda_module(python, python_path, module_path)
-    c(module$cuda_status(), list(python = reticulate::py_config()$python))
+    module <- load_cuda_module(
+      python, python_path, module_path, require_available = FALSE
+    )
+    status <- module$cuda_status()
+    status$python <- status$python_executable %||% reticulate::py_config()$python
+    status
   }, error = function(condition) list(
-    available = FALSE, device = NULL, cupy_version = NULL,
-    python = python, error = conditionMessage(condition)
+    available = FALSE, device_id = NULL, device = NULL,
+    cupy_version = NULL, numpy_version = NULL,
+    python = python, python_version = NULL,
+    module_file = module_path, module_sha256 = NULL,
+    capability_matmul = FALSE, capability_sort = FALSE,
+    capability_solve = FALSE, runtime_warnings = character(),
+    error = conditionMessage(condition), error_type = class(condition)[[1L]]
   ))
+}
+
+gpu_runtime_metadata <- function(
+    control = NULL, python = NULL, python_path = NULL, module_path = NULL) {
+  backend <- "cuda"
+  prediction_backend <- NA_character_
+  dr_backend <- NA_character_
+  precision <- NA_character_
+  if (!is.null(control)) {
+    prediction_backend <- control$gpu_backend %||% NA_character_
+    dr_backend <- control$dr_backend %||% NA_character_
+    precision <- control$gpu_precision %||% NA_character_
+    if (identical(prediction_backend, "cuda") ||
+        identical(dr_backend, "cuda")) backend <- "cuda"
+    python <- python %||% control$gpu_python
+    python_path <- python_path %||% control$gpu_python_path
+    module_path <- module_path %||% control$gpu_module_path
+  }
+  status <- gpu_backend_status(python, python_path, module_path)
+  list(
+    backend = backend,
+    prediction_backend = prediction_backend,
+    dr_backend = dr_backend,
+    precision = precision,
+    available = isTRUE(status$available),
+    python = status$python %||% python %||% NA_character_,
+    python_version = status$python_version %||% NA_character_,
+    cupy_version = status$cupy_version %||% NA_character_,
+    numpy_version = status$numpy_version %||% NA_character_,
+    device_id = status$device_id %||% NA_integer_,
+    device = status$device %||% NA_character_,
+    module_file = status$module_file %||% module_path %||% NA_character_,
+    module_sha256 = status$module_sha256 %||% NA_character_,
+    module_hash = status$module_sha256 %||% NA_character_,
+    cupy_file = status$cupy_file %||% NA_character_,
+    numpy_file = status$numpy_file %||% NA_character_,
+    cuda_runtime_version = status$cuda_runtime_version %||% NA_integer_,
+    cuda_driver_version = status$cuda_driver_version %||% NA_integer_,
+    capability_matmul = isTRUE(status$capability_matmul),
+    capability_sort = isTRUE(status$capability_sort),
+    capability_solve = isTRUE(status$capability_solve),
+    python_isolated = status$python_isolated %||% NA,
+    python_no_user_site = status$python_no_user_site %||% NA,
+    user_site_enabled = status$user_site_enabled %||% NA,
+    cupy_distributions = as.character(
+      status$cupy_distributions %||% character()
+    ),
+    runtime_warnings = as.character(status$runtime_warnings %||% character()),
+    error = status$error %||% NA_character_,
+    error_type = status$error_type %||% NA_character_,
+    reticulate_version = if (requireNamespace("reticulate", quietly = TRUE)) {
+      as.character(utils::packageVersion("reticulate"))
+    } else {
+      NA_character_
+    }
+  )
+}
+
+gpu_run_metadata_fields <- function(control) {
+  metadata <- gpu_runtime_metadata(control = control)
+  list(
+    gpu_runtime_available = metadata$available,
+    gpu_python_executable = metadata$python,
+    gpu_python_version = metadata$python_version,
+    gpu_numpy_version = metadata$numpy_version,
+    gpu_numpy_file = metadata$numpy_file,
+    gpu_cupy_version = metadata$cupy_version,
+    gpu_cupy_file = metadata$cupy_file,
+    gpu_device_id = metadata$device_id,
+    gpu_device_name = metadata$device,
+    gpu_cuda_runtime_version = metadata$cuda_runtime_version,
+    gpu_cuda_driver_version = metadata$cuda_driver_version,
+    gpu_module_file = metadata$module_file,
+    gpu_module_sha256 = metadata$module_sha256,
+    gpu_capability_matmul = metadata$capability_matmul,
+    gpu_capability_sort = metadata$capability_sort,
+    gpu_capability_solve = metadata$capability_solve,
+    gpu_python_isolated = metadata$python_isolated,
+    gpu_python_no_user_site = metadata$python_no_user_site,
+    gpu_user_site_enabled = metadata$user_site_enabled,
+    gpu_cupy_distributions = paste(
+      metadata$cupy_distributions, collapse = " | "
+    ),
+    gpu_runtime_warnings = paste(metadata$runtime_warnings, collapse = " | "),
+    gpu_runtime_error_type = metadata$error_type,
+    gpu_runtime_error = metadata$error,
+    gpu_reticulate_version = metadata$reticulate_version
+  )
 }
 
 gpu_module_from_control <- function(control) {
@@ -125,11 +294,18 @@ gpu_matmul <- function(X, coefficients, control) {
 }
 
 gpu_qr_marginal_quantiles <- function(
-    X, coefficients, weights, probs, shift, control) {
+    X, coefficients, weights, probs, shift, control,
+    normalization_rows = nrow(X)) {
+  if (!is.numeric(normalization_rows) || length(normalization_rows) != 1L ||
+      !is.finite(normalization_rows) || normalization_rows < 1) {
+    stop("normalization_rows must be one finite value >= 1", call. = FALSE)
+  }
+  weights <- normalize_weights(weights) *
+    (as.numeric(normalization_rows) / length(weights))
   result <- gpu_module_from_control(control)$qr_marginal_quantiles(
     unname(as.matrix(X)), unname(as.matrix(coefficients)),
     as.numeric(weights), as.numeric(probs), as.numeric(shift),
-    control$gpu_precision
+    control$gpu_precision, as.numeric(normalization_rows)
   )
   as.numeric(result)
 }

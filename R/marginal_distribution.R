@@ -47,6 +47,7 @@ conditional_draw_count <- function(fit) {
 
 rearrange_quantile_rows <- function(draws) {
   draws <- as.matrix(draws)
+  if (ncol(draws) <= 1L) return(draws)
   if (nrow(draws) == 1L) {
     return(matrix(sort(draws[1L, ]), nrow = 1L,
                   dimnames = list(rownames(draws), colnames(draws))))
@@ -178,6 +179,43 @@ draw_chunk_rows <- function(n, chunk_rows) {
   Map(seq.int, starts, pmin(n, starts + chunk_rows - 1L))
 }
 
+weighted_type7_plan <- function(
+    weights, draws_per_row, probs, normalization_rows = length(weights)) {
+  if (!is.numeric(normalization_rows) || length(normalization_rows) != 1L ||
+      !is.finite(normalization_rows) || normalization_rows < 1) {
+    stop("normalization_rows must be one finite value >= 1", call. = FALSE)
+  }
+  weights <- normalize_weights(weights) *
+    (as.numeric(normalization_rows) / length(weights))
+  total_positions <- as.numeric(normalization_rows) * draws_per_row
+  order <- 1 + (total_positions - 1) * probs
+  low_position <- pmax(floor(order), 1)
+  high_position <- pmin(low_position + 1, total_positions)
+  total_weight <- total_positions
+  target_positions <- c(low_position, high_position)
+  list(
+    weights = weights,
+    interpolation = order %% 1,
+    target_weights = target_positions,
+    total_positions = total_positions,
+    total_weight = total_weight
+  )
+}
+
+weighted_draw_quantile_matrix <- function(
+    draws, weights, probs, normalization_rows = nrow(draws)) {
+  draws <- as.matrix(draws)
+  if (any(!is.finite(draws))) {
+    stop("conditional draws contain non-finite values", call. = FALSE)
+  }
+  weighted_type7_quantile(
+    as.vector(draws),
+    rep(weights, times = ncol(draws)),
+    probs,
+    normalization_n = as.numeric(normalization_rows) * ncol(draws)
+  )
+}
+
 draw_bin_index <- function(values, lower, upper, bins) {
   scaled <- (values - lower) / (upper - lower)
   pmax(1L, pmin(bins, as.integer(floor(scaled * bins)) + 1L))
@@ -240,9 +278,14 @@ collect_target_bin_draws <- function(
   candidates
 }
 
-chunked_weighted_draw_quantile <- function(fit, X, weights, probs, control) {
+chunked_weighted_draw_quantile <- function(
+    fit, X, weights, probs, control, normalization_rows = nrow(X)) {
   n <- nrow(X)
   draws_per_row <- conditional_draw_count(fit)
+  plan <- weighted_type7_plan(
+    weights, draws_per_row, probs, normalization_rows
+  )
+  weights <- plan$weights
   chunks <- draw_chunk_rows(n, control$marginal_chunk_rows)
   range <- chunked_draw_range(fit, X, control, chunks)
   if (!all(is.finite(range))) {
@@ -257,15 +300,6 @@ chunked_weighted_draw_quantile <- function(fit, X, weights, probs, control) {
     return(result)
   }
 
-  total_positions <- as.numeric(n) * draws_per_row
-  order <- 1 + (total_positions - 1) * probs
-  low_position <- pmax(floor(order), 1)
-  high_position <- pmin(low_position + 1, total_positions)
-  interpolation <- order %% 1
-  target_positions <- c(low_position, high_position)
-  total_weight <- sum(weights) * draws_per_row
-  target_weights <- target_positions / total_positions * total_weight
-
   bins <- control$marginal_histogram_bins
   max_bins <- 4194304L
   repeat {
@@ -274,9 +308,9 @@ chunked_weighted_draw_quantile <- function(fit, X, weights, probs, control) {
       range[["lower"]], range[["upper"]], bins
     )
     cumulative <- cumsum(histogram$weights)
-    cumulative[[length(cumulative)]] <- total_weight
-    target_bins <- vapply(target_weights, function(target) {
-      which(cumulative >= target)[[1L]]
+    cumulative[[length(cumulative)]] <- plan$total_weight
+    target_bins <- vapply(plan$target_weights, function(target) {
+      weighted_rank_index(cumulative, target, plan$total_weight)
     }, integer(1L))
     candidate_draws <- sum(histogram$counts[unique(target_bins)])
     if (candidate_draws <= control$marginal_candidate_max || bins >= max_bins) {
@@ -296,18 +330,20 @@ chunked_weighted_draw_quantile <- function(fit, X, weights, probs, control) {
     fit, X, weights, control, chunks,
     range[["lower"]], range[["upper"]], bins, unique(target_bins)
   )
-  selected <- vapply(seq_along(target_weights), function(i) {
+  selected <- vapply(seq_along(plan$target_weights), function(i) {
     target_bin <- target_bins[[i]]
     before <- if (target_bin == 1L) 0 else cumulative[[target_bin - 1L]]
     local <- candidates[candidates$bin == target_bin]
     local_cumulative <- before + cumsum(local$weight)
     local_cumulative[[length(local_cumulative)]] <- cumulative[[target_bin]]
-    hit <- which(local_cumulative >= target_weights[[i]])[[1L]]
+    hit <- weighted_rank_index(
+      local_cumulative, plan$target_weights[[i]], plan$total_weight
+    )
     local$value[[hit]]
   }, numeric(1L))
   k <- length(probs)
-  result <- (1 - interpolation) * selected[seq_len(k)] +
-    interpolation * selected[k + seq_len(k)]
+  result <- (1 - plan$interpolation) * selected[seq_len(k)] +
+    plan$interpolation * selected[k + seq_len(k)]
   attr(result, "marginal_diagnostics") <- list(
     method = "chunked",
     passes = 2L + if (bins == control$marginal_histogram_bins) 1L else {
@@ -315,23 +351,124 @@ chunked_weighted_draw_quantile <- function(fit, X, weights, probs, control) {
     },
     histogram_bins = bins,
     candidate_draws = candidate_draws,
-    estimated_matrix_mb = total_positions * 8 / 1024^2
+    estimated_matrix_mb = as.numeric(n) * draws_per_row * 8 / 1024^2
   )
   result
 }
 
-inverse_step_cdf <- function(thresholds, cdf, probs) {
+correct_distribution_cdf <- function(
+    thresholds, cdf,
+    method = c("cummax", "rearrange", "isotonic", "none")) {
+  method <- match.arg(method)
   ordering <- order(thresholds)
   thresholds <- thresholds[ordering]
-  cdf <- cdf[ordering]
-  cdf <- cummax(pmin(1, pmax(0, cdf)))
-  vapply(probs, function(probability) {
-    hit <- which(cdf >= probability)[1L]
-    if (is.na(hit)) thresholds[[length(thresholds)]] else thresholds[[hit]]
-  }, numeric(1L))
+  original <- as.numeric(cdf[ordering])
+  if (any(!is.finite(original))) {
+    stop("distribution-regression CDF contains non-finite values", call. = FALSE)
+  }
+  bounded <- pmin(1, pmax(0, original))
+  corrected <- switch(
+    method,
+    cummax = cummax(bounded),
+    rearrange = sort(bounded),
+    isotonic = as.numeric(stats::isoreg(thresholds, bounded)$yf),
+    none = bounded
+  )
+  corrected <- pmin(1, pmax(0, corrected))
+  raw_crossings <- pmax(-diff(original), 0)
+  corrected_crossings <- pmax(-diff(corrected), 0)
+  bound_adjustment <- abs(bounded - original)
+  list(
+    thresholds = thresholds,
+    cdf = corrected,
+    diagnostics = list(
+      dr_noncrossing = method,
+      dr_raw_crossing_pairs = sum(raw_crossings > 0),
+      dr_raw_max_crossing = if (length(raw_crossings)) max(raw_crossings) else 0,
+      dr_out_of_bounds_values = sum(bound_adjustment > 0),
+      dr_max_bound_adjustment = if (length(bound_adjustment)) {
+        max(bound_adjustment)
+      } else 0,
+      dr_corrected_crossing_pairs = sum(corrected_crossings > 0),
+      dr_max_adjustment = if (length(original)) {
+        max(abs(corrected - original))
+      } else 0
+    )
+  )
 }
 
-marginal_quantiles <- function(fit, X, weights, probs, control) {
+inverse_step_cdf <- function(
+    thresholds, cdf, probs,
+    noncrossing = c("cummax", "rearrange", "isotonic", "none")) {
+  corrected <- correct_distribution_cdf(thresholds, cdf, noncrossing)
+  result <- vapply(probs, function(probability) {
+    cdf <- corrected$cdf
+    hit <- which(cdf >= probability)[1L]
+    if (is.na(hit)) {
+      corrected$thresholds[[length(corrected$thresholds)]]
+    } else {
+      corrected$thresholds[[hit]]
+    }
+  }, numeric(1L))
+  attr(result, "dr_noncrossing_diagnostics") <- corrected$diagnostics
+  result
+}
+
+distribution_probabilities <- function(linear_predictor, model) {
+  switch(
+    model,
+    logit = stats::plogis(linear_predictor),
+    probit = stats::pnorm(linear_predictor),
+    cloglog = {
+      values <- -expm1(-exp(pmin(700, as.numeric(linear_predictor))))
+      matrix(values, nrow = nrow(linear_predictor),
+             ncol = ncol(linear_predictor))
+    },
+    lpm = linear_predictor
+  )
+}
+
+cpu_dr_marginal_cdf <- function(X, fit, weights, control) {
+  weights <- normalize_weights(weights)
+  threshold_count <- ncol(fit$coefficients)
+  estimated_matrix_mb <-
+    as.numeric(nrow(X)) * threshold_count * 8 / 1024^2
+  resolved <- if (identical(control$marginal_method, "auto")) {
+    if (2 * estimated_matrix_mb <= control$marginal_matrix_max_mb) {
+      "matrix"
+    } else {
+      "chunked"
+    }
+  } else {
+    control$marginal_method
+  }
+  if (identical(resolved, "matrix")) {
+    probabilities <- distribution_probabilities(
+      X %*% fit$coefficients, fit$model
+    )
+    cdf <- drop(crossprod(weights, probabilities)) / sum(weights)
+    return(list(
+      cdf = cdf, method = "cdf_matrix", passes = 1L,
+      estimated_matrix_mb = estimated_matrix_mb
+    ))
+  }
+
+  chunks <- draw_chunk_rows(nrow(X), control$marginal_chunk_rows)
+  totals <- numeric(threshold_count)
+  for (rows in chunks) {
+    probabilities <- distribution_probabilities(
+      X[rows, , drop = FALSE] %*% fit$coefficients, fit$model
+    )
+    totals <- totals + drop(crossprod(weights[rows], probabilities))
+  }
+  list(
+    cdf = totals / sum(weights), method = "cdf_chunked",
+    passes = length(chunks), estimated_matrix_mb = estimated_matrix_mb
+  )
+}
+
+marginal_quantiles <- function(
+    fit, X, weights, probs, control, normalization_rows = nrow(X)) {
   if (inherits(fit, "cf_cox_fit")) {
     return(cox_marginal_quantiles(
       fit, X, weights, probs, control$cox_boundary
@@ -342,31 +479,29 @@ marginal_quantiles <- function(fit, X, weights, probs, control) {
       marginal_cdf <- gpu_dr_marginal_cdf(
         X, fit$coefficients, weights, fit$model, control
       )
-    } else {
-      linear_predictor <- X %*% fit$coefficients
-      probabilities <- switch(
-        fit$model,
-        logit = stats::plogis(linear_predictor),
-        probit = stats::pnorm(linear_predictor),
-        cloglog = {
-          values <- -expm1(-exp(pmin(700, as.numeric(linear_predictor))))
-          matrix(values, nrow = nrow(linear_predictor),
-                 ncol = ncol(linear_predictor))
-        },
-        lpm = linear_predictor
-      )
-      marginal_cdf <- colSums(probabilities * weights) / sum(weights)
-    }
-    result <- inverse_step_cdf(fit$thresholds, marginal_cdf, probs)
-    attr(result, "marginal_diagnostics") <- list(
-      method = if (identical(control$gpu_backend, "cuda")) {
-        "cdf_cuda"
-      } else {
-        "cdf"
-      }, passes = 1L, histogram_bins = NA_integer_,
-      candidate_draws = NA_real_, estimated_matrix_mb =
+      marginal_method <- "cdf_cuda"
+      marginal_passes <- 1L
+      estimated_matrix_mb <-
         as.numeric(nrow(X)) * ncol(fit$coefficients) * 8 / 1024^2
+    } else {
+      cpu_result <- cpu_dr_marginal_cdf(X, fit, weights, control)
+      marginal_cdf <- cpu_result$cdf
+      marginal_method <- cpu_result$method
+      marginal_passes <- cpu_result$passes
+      estimated_matrix_mb <- cpu_result$estimated_matrix_mb
+    }
+    result <- inverse_step_cdf(
+      fit$thresholds, marginal_cdf, probs, control$dr_noncrossing
     )
+    noncrossing_diagnostics <- attr(result, "dr_noncrossing_diagnostics")
+    attr(result, "marginal_diagnostics") <- c(list(
+      method = paste0(
+        marginal_method, "_", noncrossing_diagnostics$dr_noncrossing
+      ),
+      passes = marginal_passes, histogram_bins = NA_integer_,
+      candidate_draws = NA_real_, estimated_matrix_mb =
+        estimated_matrix_mb
+    ), noncrossing_diagnostics)
     return(result)
   }
   if (identical(control$gpu_backend, "cuda") &&
@@ -376,7 +511,8 @@ marginal_quantiles <- function(fit, X, weights, probs, control) {
     shift <- if (inherits(fit, "cf_qr_fit") &&
                  isTRUE(control$legacy_qr_shift)) control$trimming else 0
     result <- gpu_qr_marginal_quantiles(
-      X, fit$coefficients, weights, probs, shift, control
+      X, fit$coefficients, weights, probs, shift, control,
+      normalization_rows = normalization_rows
     )
     attr(result, "marginal_diagnostics") <- list(
       method = "cuda_weighted_quantile", passes = 1L,
@@ -389,15 +525,21 @@ marginal_quantiles <- function(fit, X, weights, probs, control) {
   }
   method <- resolve_marginal_method(fit, X, control)
   if (method$resolved == "chunked") {
-    return(chunked_weighted_draw_quantile(fit, X, weights, probs, control))
+    return(chunked_weighted_draw_quantile(
+      fit, X, weights, probs, control, normalization_rows
+    ))
   }
   draws <- predict_conditional_draws(fit, X, control)
-  result <- weighted_quantile(
-    as.vector(draws),
-    rep(weights, times = ncol(draws)),
-    probs,
-    legacy = control$legacy_weighted_quantile
-  )
+  result <- if (isTRUE(control$legacy_weighted_quantile)) {
+    weighted_quantile(
+      as.vector(draws),
+      rep(weights, times = ncol(draws)),
+      probs,
+      legacy = TRUE
+    )
+  } else {
+    weighted_draw_quantile_matrix(draws, weights, probs, normalization_rows)
+  }
   rm(draws)
   invisible(gc())
   attr(result, "marginal_diagnostics") <- list(

@@ -1,0 +1,15 @@
+position,column,storage,meaning
+1,model,character,Conditional model used for the run
+2,solver,character,QR solver or NA for non-QR models
+3,quantile,double,Reported unconditional quantile probability
+4,effect,character,structure composition or total
+5,estimate,double,Group 1 minus group 0 effect in outcome units
+6,identified,logical,Whether the requested effect is identified
+7,std_error,double_or_na,Bootstrap standard error
+8,pointwise_lower,double_or_na,Lower pointwise confidence limit
+9,pointwise_upper,double_or_na,Upper pointwise confidence limit
+10,uniform_lower,double_or_na,Lower simultaneous confidence limit
+11,uniform_upper,double_or_na,Upper simultaneous confidence limit
+12,bootstrap_reps,integer,Requested bootstrap replications
+13,bootstrap_reps_effective,integer,Successful bootstrap replications used
+14,alpha,double,Inference significance level

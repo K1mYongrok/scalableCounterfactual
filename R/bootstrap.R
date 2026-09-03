@@ -20,6 +20,103 @@ bootstrap_data_fingerprint <- function(prepared) {
   ))
 }
 
+bootstrap_runtime_package_version <- function(package) {
+  if (!requireNamespace(package, quietly = TRUE)) return(NA_character_)
+  as.character(utils::packageVersion(package))
+}
+
+bootstrap_gpu_runtime_identity <- function(control, model, solver) {
+  gpu_active <- identical(control$gpu_backend, "cuda") ||
+    identical(control$dr_backend, "cuda") || identical(solver, "cuda_admm")
+  if (!gpu_active) return(NULL)
+  module_path <- control$gpu_module_path
+  if (is.null(module_path)) {
+    module_path <- tryCatch(gpu_python_module_path(), error = function(error) NULL)
+  }
+  module_hash <- if (!is.null(module_path) && file.exists(module_path)) {
+    object_md5(readBin(module_path, what = "raw", n = file.info(module_path)$size))
+  } else {
+    NA_character_
+  }
+  if (exists("gpu_runtime_metadata", mode = "function", inherits = TRUE)) {
+    metadata <- tryCatch(
+      gpu_runtime_metadata(control = control),
+      error = function(error) NULL
+    )
+    if (!is.null(metadata)) {
+      metadata$module_file <- metadata$module_file %||% module_path
+      metadata$module_content_md5 <- module_hash
+      return(metadata)
+    }
+  }
+  list(
+    backend = control$gpu_backend,
+    model = model,
+    solver = solver,
+    python = control$gpu_python %||% NA_character_,
+    python_path = control$gpu_python_path %||% NA_character_,
+    module_file = module_path %||% NA_character_,
+    module_hash = module_hash,
+    reticulate_version = bootstrap_runtime_package_version("reticulate")
+  )
+}
+
+bootstrap_runtime_identity <- function(model, solver, control, point = NULL) {
+  requested_backends <- c(
+    solver %||% character(), control$linear_backend, control$dr_backend
+  )
+  resolved_backends <- if (!is.null(point) && length(point$fits)) {
+    unique(unlist(lapply(point$fits, function(fit) {
+      c(
+        fit$solver %||% character(), fit$backend %||% character(),
+        fit$selection_backend %||% character()
+      )
+    }), use.names = FALSE))
+  } else {
+    character()
+  }
+  fitted_backends <- unique(c(requested_backends, resolved_backends))
+  versions <- list()
+  if (isTRUE(control$legacy_weighted_quantile)) {
+    versions$Hmisc <- bootstrap_runtime_package_version("Hmisc")
+  }
+  if (is_quantile_process_model(model)) {
+    versions$quantreg <- bootstrap_runtime_package_version("quantreg")
+  }
+  if (identical(model, "cox")) {
+    versions$survival <- bootstrap_runtime_package_version("survival")
+  }
+  uses_auto_dr <- identical(control$dr_backend, "auto") &&
+    model %in% c("cqr", "logit", "probit", "cloglog")
+  needs_fastglm_identity <- uses_auto_dr ||
+    any(grepl("fastglm", fitted_backends, fixed = TRUE))
+  fastglm_available <- if (needs_fastglm_identity) {
+    requireNamespace("fastglm", quietly = TRUE)
+  } else {
+    NA
+  }
+  if (needs_fastglm_identity) {
+    versions$fastglm <- bootstrap_runtime_package_version("fastglm")
+  }
+  if (any(grepl("speedglm", fitted_backends, fixed = TRUE))) {
+    versions$speedglm <- bootstrap_runtime_package_version("speedglm")
+  }
+  list(
+    R = R.version.string,
+    platform = R.version$platform,
+    os_type = .Platform$OS.type,
+    blas = unname(extSoftVersion()[["BLAS"]] %||% NA_character_),
+    lapack = as.character(base::La_version()),
+    packages = versions,
+    backend_availability = if (uses_auto_dr) {
+      list(fastglm = fastglm_available)
+    } else {
+      list()
+    },
+    gpu = bootstrap_gpu_runtime_identity(control, model, solver)
+  )
+}
+
 bootstrap_signature <- function(
     prepared, model, solver, control, seed, bootstrap_engine,
     draw_point_workers = 1L,
@@ -28,7 +125,7 @@ bootstrap_signature <- function(
     data_fingerprint <- bootstrap_data_fingerprint(prepared)
   }
   object_md5(list(
-    schema_version = 12L,
+    schema_version = 14L,
     package_version = as.character(
       utils::packageVersion("scalableCounterfactual")
     ),
@@ -36,12 +133,14 @@ bootstrap_signature <- function(
     extension_registry = active_extension_fingerprint(
       model, solver, control, point
     ),
+    runtime = bootstrap_runtime_identity(model, solver, control, point),
     model = model,
     solver = solver,
     nreg = control$nreg,
     trimming = control$trimming,
     quantiles = control$reported_quantiles,
     conditional_quantiles = control$conditional_quantiles,
+    full_conditional_quantiles = control$full_conditional_quantiles,
     bootstrap_scheme = control$bootstrap_scheme,
     legacy_qr_shift = control$legacy_qr_shift,
     legacy_weighted_quantile = control$legacy_weighted_quantile,
@@ -63,6 +162,7 @@ bootstrap_signature <- function(
     marginal_histogram_bins = control$marginal_histogram_bins,
     marginal_candidate_max = control$marginal_candidate_max,
     quantile_noncrossing = control$quantile_noncrossing,
+    dr_noncrossing = control$dr_noncrossing,
     cqr_right = control$cqr_right,
     cqr_nsteps = control$cqr_nsteps,
     cqr_first_cut = control$cqr_first_cut,
@@ -152,9 +252,16 @@ fit_bootstrap_onestep <- function(
   X <- as.matrix(X)
   y <- as.numeric(y)
   weights <- normalize_weights(weights)
-  bootstrap_weights <- weights * as.numeric(multipliers)
+  multipliers <- as.numeric(multipliers)
+  if (length(multipliers) != nrow(X) || any(!is.finite(multipliers)) ||
+      any(multipliers < 0)) {
+    stop("invalid onestep bootstrap multipliers", call. = FALSE)
+  }
+  bootstrap_weights <- weights * multipliers
   active <- bootstrap_weights > 0
-  if (sum(active) <= ncol(X)) {
+  active_design <- X[active, , drop = FALSE]
+  if (sum(multipliers) <= ncol(X) || sum(active) < ncol(X) ||
+      qr(active_design, LAPACK = FALSE)$rank < ncol(X)) {
     stop("Stata-compatible bootstrap draw has an unidentified design",
          call. = FALSE)
   }
@@ -390,12 +497,92 @@ bootstrap_checkpoint_path <- function(run_dir, rep_id) {
   file.path(run_dir, sprintf("bootstrap_rep_%04d.rds", rep_id))
 }
 
-valid_bootstrap_checkpoint <- function(path, signature, rep_id) {
+valid_bootstrap_checkpoint <- function(path, common, rep_id) {
   if (!file.exists(path)) return(NULL)
   existing <- tryCatch(readRDS(path), error = function(e) NULL)
-  if (is.null(existing) ||
-      !identical(existing$signature, signature) ||
-      !identical(existing$replication, as.integer(rep_id))) {
+  required <- c(
+    "signature", "data_fingerprint", "replication", "attempt", "seed",
+    "effects", "elapsed_seconds", "peak_r_heap_mb", "warnings",
+    "dropped_design_columns", "group0_active_rows", "group1_active_rows",
+    "active_rows", "resources", "bootstrap_engine", "bootstrap_scheme",
+    "draw_point_workers", "attempt_failures"
+  )
+  expected_effects <- c("structure", "composition", "total")
+  effects_valid <- function(effects) {
+    values <- as.numeric(effects)
+    if (identical(common$model, "cox")) {
+      return(all(is.finite(values) | (is.na(values) & !is.nan(values))))
+    }
+    all(is.finite(values))
+  }
+  nonnegative_scalar <- function(value) {
+    is.numeric(value) && length(value) == 1L && !is.na(value) &&
+      is.finite(value) && value >= 0
+  }
+  active_counts_valid <- function(object) {
+    values <- object[c(
+      "group0_active_rows", "group1_active_rows", "active_rows",
+      "draw_point_workers"
+    )]
+    typed <- all(vapply(values, function(value) {
+      is.integer(value) && length(value) == 1L && !is.na(value)
+    }, logical(1L)))
+    typed && object$group0_active_rows >= 1L &&
+      object$group0_active_rows <= common$prepared$n0 &&
+      object$group1_active_rows >= 1L &&
+      object$group1_active_rows <= common$prepared$n1 &&
+      object$active_rows == object$group0_active_rows + object$group1_active_rows &&
+      object$draw_point_workers >= 1L
+  }
+  resources_valid <- function(resources) {
+    is.data.frame(resources) && nrow(resources) >= 1L &&
+      all(c("phase", "elapsed_seconds", "peak_r_heap_mb") %in% names(resources)) &&
+      is.character(resources$phase) &&
+      is.numeric(resources$elapsed_seconds) &&
+      is.numeric(resources$peak_r_heap_mb) &&
+      all(is.finite(resources$elapsed_seconds) & resources$elapsed_seconds >= 0) &&
+      all(is.finite(resources$peak_r_heap_mb) & resources$peak_r_heap_mb >= 0)
+  }
+  failures_valid <- function(failures) {
+    if (!is.data.frame(failures)) return(FALSE)
+    if (!nrow(failures)) return(TRUE)
+    required_failures <- c("replication", "attempt", "seed", "error")
+    all(required_failures %in% names(failures)) &&
+      is.numeric(failures$replication) &&
+      is.numeric(failures$attempt) &&
+      is.numeric(failures$seed) &&
+      is.character(failures$error) &&
+      all(is.finite(failures$replication)) &&
+      all(is.finite(failures$attempt)) && all(failures$attempt >= 0) &&
+      all(is.finite(failures$seed)) &&
+      all(nzchar(failures$error))
+  }
+  valid <- tryCatch({
+    is.list(existing) && all(required %in% names(existing)) &&
+    identical(existing$signature, common$signature) &&
+    identical(existing$data_fingerprint, common$data_fingerprint) &&
+    identical(existing$replication, as.integer(rep_id)) &&
+    is.integer(existing$attempt) && length(existing$attempt) == 1L &&
+    !is.na(existing$attempt) && existing$attempt >= 0L &&
+    is.integer(existing$seed) && length(existing$seed) == 1L &&
+    !is.na(existing$seed) &&
+    is.matrix(existing$effects) && is.numeric(existing$effects) &&
+    identical(dim(existing$effects), c(
+      3L, as.integer(length(common$control$reported_quantiles))
+    )) && identical(rownames(existing$effects), expected_effects) &&
+    effects_valid(existing$effects) &&
+    nonnegative_scalar(existing$elapsed_seconds) &&
+    nonnegative_scalar(existing$peak_r_heap_mb) &&
+    is.character(existing$warnings) &&
+    is.character(existing$dropped_design_columns) &&
+    active_counts_valid(existing) &&
+    resources_valid(existing$resources) &&
+    identical(existing$bootstrap_engine, common$bootstrap_engine) &&
+    identical(existing$bootstrap_scheme, common$control$bootstrap_scheme) &&
+    identical(existing$draw_point_workers, common$draw_point_workers) &&
+    failures_valid(existing$attempt_failures)
+  }, error = function(error) FALSE)
+  if (!isTRUE(valid)) {
     return(NULL)
   }
   existing
@@ -426,6 +613,9 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
   boot_data$X0 <- prepared$X0[active0, , drop = FALSE]
   boot_data$y0 <- prepared$y0[active0]
   boot_data$w0 <- prepared$w0[active0] * multiplier0[active0]
+  boot_data$quantile_frequency0 <- if (
+    common$control$bootstrap_scheme == "multiplier"
+  ) rep(1, sum(active0)) else as.numeric(multiplier0[active0])
   if (!is.null(prepared$censoring0)) {
     boot_data$censoring0 <- prepared$censoring0[active0]
   }
@@ -435,6 +625,9 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
   boot_data$X1 <- prepared$X1[active1, , drop = FALSE]
   boot_data$y1 <- prepared$y1[active1]
   boot_data$w1 <- prepared$w1[active1] * multiplier1[active1]
+  boot_data$quantile_frequency1 <- if (
+    common$control$bootstrap_scheme == "multiplier"
+  ) rep(1, sum(active1)) else as.numeric(multiplier1[active1])
   if (!is.null(prepared$censoring1)) {
     boot_data$censoring1 <- prepared$censoring1[active1]
   }
@@ -444,6 +637,13 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
   boot_data$n0 <- sum(active0)
   boot_data$n1 <- sum(active1)
   boot_data$n <- boot_data$n0 + boot_data$n1
+  estimation_data <- boot_data
+  if (isTRUE(common$control$legacy_weighted_quantile)) {
+    # Counterfactual 1.2 divided resampled weights by the original resample
+    # size. Keep n0/n1/n on boot_data as physical retained-row counts while
+    # using that legacy denominator only for decomposition evaluation.
+    estimation_data$n <- prepared$n
+  }
   if (common$bootstrap_engine == "onestep") {
     started <- proc.time()[["elapsed"]]
     group0 <- measure_resources(function() {
@@ -459,7 +659,7 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
       )
     })
     evaluated <- evaluate_decomposition(
-      boot_data, group0$value, group1$value, common$control
+      estimation_data, group0$value, group1$value, common$control
     )
     point <- list(
       effects = evaluated$effects,
@@ -494,7 +694,7 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
       )
     })
     evaluated <- evaluate_decomposition(
-      boot_data, group0$value, group1$value, common$control
+      estimation_data, group0$value, group1$value, common$control
     )
     point <- list(
       effects = evaluated$effects,
@@ -515,9 +715,9 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
       )
     )
   } else {
-    boot_data <- reduce_prepared_design(boot_data)
+    estimation_data <- reduce_prepared_design(estimation_data)
     point <- estimate_point_prepared(
-      boot_data,
+      estimation_data,
       common$model,
       common$solver,
       common$control,
@@ -538,7 +738,10 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
     elapsed_seconds = point$elapsed_seconds,
     peak_r_heap_mb = max(point$resources$peak_r_heap_mb),
     warnings = point$warnings,
-    dropped_design_columns = boot_data$dropped_design_columns,
+    dropped_design_columns = estimation_data$dropped_design_columns,
+    group0_active_rows = as.integer(boot_data$n0),
+    group1_active_rows = as.integer(boot_data$n1),
+    active_rows = as.integer(boot_data$n),
     resources = point$resources,
     bootstrap_engine = common$bootstrap_engine,
     bootstrap_scheme = common$control$bootstrap_scheme,
@@ -551,7 +754,7 @@ bootstrap_replication_attempt <- function(rep_id, attempt, common) {
 bootstrap_replication <- function(rep_id, common) {
   rep_id <- as.integer(rep_id)
   path <- bootstrap_checkpoint_path(common$run_dir, rep_id)
-  existing <- valid_bootstrap_checkpoint(path, common$signature, rep_id)
+  existing <- valid_bootstrap_checkpoint(path, common, rep_id)
   if (!is.null(existing)) {
     return(list(
       status = "ok", path = path, replication = rep_id,
@@ -721,13 +924,11 @@ run_cf_bootstrap <- function(
     )
   }
   paths <- vapply(outcomes, `[[`, character(1L), "path")
-  checkpoints <- lapply(paths, readRDS)
-  if (!all(vapply(
-    checkpoints,
-    function(x) identical(x$signature, signature),
-    logical(1L)
-  ))) {
-    stop("bootstrap checkpoint signature mismatch", call. = FALSE)
+  checkpoints <- lapply(seq_along(paths), function(index) {
+    valid_bootstrap_checkpoint(paths[[index]], common, rep_ids[[index]])
+  })
+  if (any(vapply(checkpoints, is.null, logical(1L)))) {
+    stop("bootstrap checkpoint failed final integrity validation", call. = FALSE)
   }
   effect_names <- c("structure", "composition", "total")
   effect_draws <- stats::setNames(lapply(effect_names, function(effect) {

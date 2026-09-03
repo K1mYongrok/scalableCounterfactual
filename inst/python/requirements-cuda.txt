@@ -1,5 +1,5 @@
 # Minimum reproducible CUDA environment validated for scalableCounterfactual.
-# Install into a project-local directory, for example:
-# python -m pip install --target tmp/cuda_python -r requirements-cuda.txt
+# Install into an isolated project-local virtual environment, for example:
+# python -m venv .venv && .venv/Scripts/python -m pip install -r requirements-cuda.txt
 numpy==2.5.1
 cupy-cuda12x==14.1.1

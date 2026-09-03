@@ -20,7 +20,7 @@ The public `onestep` point and bootstrap backends specifically transcribe
 
   ec56830ef9c84ce54411ad59c5ce94535847d9df
 
-The native R implementation uses R/quantreg numerical primitives in place of
+The native R implementation uses R and quantreg numerical primitives in place of
 Mata's exact solvers and `luinv()`. Algorithmic compatibility is intended;
 cross-language bitwise identity is not claimed.
 

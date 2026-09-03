@@ -13,13 +13,16 @@ The default remains `gpu_backend = "cpu"`. The optional layer contains:
 - batched unpenalized binomial IRLS for logit, probit, and cloglog DR;
 - an experimental weighted QR ADMM solver named `cuda_admm`.
 
-QR and CQR marginal quantile selection follows the established
-`Hmisc::wtd.quantile(..., normwt = TRUE)` rank and interpolation definition on
-the GPU. Explicit `marginal_method = "chunked"` continues to request the
-bounded-host-memory implementation; `auto` and `matrix` use GPU-resident
-sorting when CUDA is selected. The legacy scale-sensitive definition remains
-on the CPU. GPU sorting must fit the conditional draws and sorting workspace in
-device memory. Bootstrap replications remain
+QR and CQR marginal quantile selection uses the same stable normalized
+weighted type-7 rule on CPU and GPU. It agrees with
+`Hmisc::wtd.quantile(..., normwt = TRUE)` for ordinary weights when cumulative
+weighted ranks are numerically distinct, but evaluates ranks directly to avoid
+`approx()` tie collapse for extreme weight ranges. Explicit
+`marginal_method = "chunked"` continues to request the bounded-host-memory
+implementation; `auto` and `matrix` use GPU-resident sorting when CUDA is
+selected. The legacy scale-sensitive definition remains on the CPU. GPU
+sorting must fit the conditional draws and sorting workspace in device memory.
+Bootstrap replications remain
 checkpointed and deterministic and run in one R process; threshold and
 quantile columns are batched inside the GPU process.
 
@@ -28,32 +31,56 @@ quantile columns are batched inside the GPU process.
 CuPy and `reticulate` are optional dependencies. A project-local Python
 installation can be passed through `gpu_python_path`. On Windows, the package
 adds the CUDA runtime directories supplied by the Python packages before CuPy
-is imported. `gpu_backend_status()` reports the selected Python executable,
-device, CuPy version, and initialization error. Imported modules and normalized
-runtime paths are cached once per Python executable. Existing `PATH` and
-`PYTHONPATH` entries are split on the platform path separator and de-duplicated,
-so repeated bootstrap and chunk calls do not grow the process environment.
+is imported. Use an isolated virtual environment; do not mix a `--target`
+installation with packages visible in the Python user site, which can load
+CuPy from one location and CUDA libraries from another.
+`gpu_backend_status()` reports
+the selected Python executable, Python/NumPy/CuPy versions and files, device,
+CUDA runtime and driver versions, visible CuPy distributions, source-module
+SHA-256, and initialization warnings. It marks CUDA available only after small
+matrix-multiplication, sorting, and linear-solve probes have completed and the
+default stream has synchronized.
 
-The validated installation entry point is bundled at
-`inst/python/requirements-cuda.txt`:
+CUDA modules are loaded under a name derived from their normalized path and
+content hash, and their Python `__file__` is checked against the requested
+file. Imported modules and normalized runtime paths are cached once per unique
+runtime/module identity. Existing `PATH` and `PYTHONPATH` entries are split on
+the platform path separator and de-duplicated, so repeated bootstrap and chunk
+calls do not grow the process environment. A custom `gpu_module_path` executes
+Python code and must therefore point only to a trusted local file.
+
+The exact Windows/Python 3.12 validation set is bundled at
+`inst/python/requirements-cuda-windows-py312.lock`. For example:
 
 ```powershell
-python -m pip install --target tmp/cuda_python `
-  -r inst/python/requirements-cuda.txt
+py -3.12 -m venv tmp/cuda-venv
+$env:PYTHONNOUSERSITE = "1"
+tmp/cuda-venv/Scripts/python.exe -m pip install `
+  -r inst/python/requirements-cuda-windows-py312.lock
 ```
 
-Release 0.15.0 was validated with Python 3.12.1, NumPy 2.5.1,
-CuPy CUDA 12x 14.1.1, and an NVIDIA RTX 4060 Ti. The exact Windows dependency
-set is recorded in `requirements-cuda-windows-py312.lock`. Other compatible
-CUDA 12 devices and Python versions may work, but must pass
-`tests/gpu_backend.R` before substantive analysis.
+Pass the virtual environment's Python executable as `gpu_python` and its
+`Lib/site-packages` directory as `gpu_python_path`. The shorter
+`requirements-cuda.txt` is the normal minimum entry point; the lock file is the
+release validation environment. Other compatible CUDA 12 devices and Python
+versions may work, but must pass `tests/gpu_backend.R` before substantive
+analysis. Setting `PYTHONNOUSERSITE=1` before R initializes Python prevents a
+user-site CuPy installation from shadowing the selected environment.
 
 Model/backend combinations are validated before execution. CUDA distribution
 regression is restricted to logit, probit, and cloglog; Cox remains a CPU-only
 fit and marginalization path. Run metadata distinguishes the requested backend
 from the resolved fit backend and reports fit, prediction, and marginalization
 devices independently. CUDA DR additionally stores each threshold's actual
-backend and any CPU-fallback reason.
+backend and any CPU-fallback reason. Point-run metadata retain the selected
+Python, NumPy, and CuPy versions and files, device and CUDA versions, module
+path and SHA-256, isolation flags, capability-probe results, and runtime
+warnings so the executed GPU environment remains auditable.
+
+Checkpoint/runtime identity includes Python, NumPy and CuPy versions, device
+and CUDA versions, the loaded module path and SHA-256, capability-probe
+results, and visible-runtime warnings. A change in this identity prevents a
+checkpoint produced by another GPU implementation from being silently reused.
 
 ## Numerical policy
 
@@ -67,6 +94,13 @@ bootstrap law. Record at least:
 4. bootstrap standard-error differences;
 5. raw and corrected quantile-crossing diagnostics;
 6. elapsed time, R heap, device memory, and precision.
+
+When `float32` is explicitly selected, DR probability clipping uses a
+float32-aware epsilon. CPU and CUDA boundary diagnostics use the same
+scale-aware signed-margin condition for complete and quasi-complete separation.
+This avoids declaring a model separated solely because one legitimate fitted
+probability is extreme. Survey-weight cumulative sums for CUDA QR
+marginalization remain float64 even when conditional draws use float32.
 
 Large coefficient differences under complete or quasi-complete separation do
 not by themselves establish a numerical disagreement: the finite coefficient

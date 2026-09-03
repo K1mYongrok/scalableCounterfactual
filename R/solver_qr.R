@@ -112,9 +112,16 @@ stata_weighted_quantile_type2 <- function(x, weights, probs) {
   }, numeric(1L))
 }
 
-stata_weighted_scale <- function(residuals, weights) {
-  weights <- normalize_weights(weights)
-  n <- length(residuals)
+stata_weighted_scale <- function(
+    residuals, weights, effective_n = length(residuals)) {
+  if (!is.numeric(effective_n) || length(effective_n) != 1L ||
+      !is.finite(effective_n) || effective_n < 1 ||
+      effective_n != floor(effective_n)) {
+    stop("effective_n must be one positive integer", call. = FALSE)
+  }
+  weights <- normalize_weights(weights) *
+    (as.numeric(effective_n) / length(weights))
+  n <- as.numeric(effective_n)
   center <- sum(weights * residuals) / sum(weights)
   variance <- if (n > 1L) {
     sum(weights * (residuals - center)^2) / (n - 1L)
@@ -148,7 +155,7 @@ stata_onestep_bandwidth <- function(
   bandwidth <- (
     stats::qnorm(tau + probability_bandwidth) -
       stats::qnorm(tau - probability_bandwidth)
-  ) * stata_weighted_scale(residuals, weights)
+  ) * stata_weighted_scale(residuals, weights, effective_n = n)
   if (!is.finite(bandwidth) || bandwidth <= 0) NA_real_ else bandwidth
 }
 
@@ -168,7 +175,8 @@ exact_initial_qr <- function(X, y, weights, tau, solver) {
 fit_qr_onestep <- function(
     X, y, weights, taus,
     first_solver = c("auto", "br", "fn", "pfn"),
-    bandwidth_method = c("hall_sheather", "bofinger")) {
+    bandwidth_method = c("hall_sheather", "bofinger"),
+    effective_n = nrow(X)) {
   first_solver <- match.arg(first_solver)
   bandwidth_method <- match.arg(bandwidth_method)
   if (length(taus) > 1L) {
@@ -180,7 +188,15 @@ fit_qr_onestep <- function(
       )
     }
   }
-  n <- nrow(X)
+  if (!is.numeric(effective_n) || length(effective_n) != 1L ||
+      !is.finite(effective_n) || effective_n < nrow(X) ||
+      effective_n != floor(effective_n)) {
+    stop(
+      "effective_n must be one integer at least as large as nrow(X)",
+      call. = FALSE
+    )
+  }
+  n <- as.numeric(effective_n)
   p <- ncol(X)
   ntau <- length(taus)
   resolved_first <- if (first_solver == "auto") {
@@ -282,7 +298,7 @@ fit_qr_onestep <- function(
 #' @param weights Strictly positive case weights.
 #' @param taus Sorted conditional quantiles.
 #' @param solver One of `br`, `fn`, `pfn`, `qfnb`, `pfnb`, `proqreg`,
-#'   `profn`, `onestep`, or `auto`.
+#'   `profn`, `onestep`, the experimental `cuda_admm`, or `auto`.
 #' @param precondition Apply an invertible design preconditioner before fitting
 #'   and transform coefficients back to the original units.
 #' @param onestep_first_solver Exact solver used to initialize the one-step
@@ -290,6 +306,11 @@ fit_qr_onestep <- function(
 #' @param onestep_bandwidth Bandwidth rule for the one-step process.
 #' @param gpu_control Internal `cf_control` object required by the experimental
 #'   `cuda_admm` solver.
+#' @param frequency Optional positive integer row multiplicities. Case weights
+#'   are multiplied by these frequencies. This is useful when a resample is
+#'   represented without physically duplicating rows. The experimental
+#'   `onestep` and experimental `cuda_admm` backends expand non-unit frequencies
+#'   so that their numerical paths match explicit row replication.
 #' @return A standardized QR fit list.
 #' @export
 fit_weighted_qr <- function(
@@ -301,22 +322,47 @@ fit_weighted_qr <- function(
     precondition = TRUE,
     onestep_first_solver = c("auto", "br", "fn", "pfn"),
     onestep_bandwidth = c("hall_sheather", "bofinger"),
-    gpu_control = NULL) {
+    gpu_control = NULL,
+    frequency = NULL) {
   solver <- match.arg(solver, supported_qr_solvers())
   solver_requested <- solver
   onestep_first_solver <- match.arg(onestep_first_solver)
   onestep_bandwidth <- match.arg(onestep_bandwidth)
   X <- as.matrix(X)
   y <- as.numeric(y)
-  weights <- normalize_weights(weights)
+  weights <- as.numeric(weights)
   taus <- sort(unique(as.numeric(taus)))
   if (nrow(X) != length(y) || length(y) != length(weights)) {
     stop("X, y, and weights have incompatible sizes", call. = FALSE)
   }
+  if (is.null(frequency)) frequency <- rep(1, length(y))
+  frequency <- as.numeric(frequency)
+  if (length(frequency) != length(y) || any(!is.finite(frequency)) ||
+      any(frequency < 1) || any(frequency != floor(frequency))) {
+    stop(
+      "frequency must contain one positive integer per row",
+      call. = FALSE
+    )
+  }
+  effective_n <- sum(frequency)
+  if (!is.finite(effective_n) || effective_n > .Machine$integer.max) {
+    stop("sum(frequency) exceeds the supported row limit", call. = FALSE)
+  }
   if (!length(taus) || any(taus <= 0 | taus >= 1)) {
     stop("taus must lie strictly between 0 and 1", call. = FALSE)
   }
-  solver <- resolve_qr_solver(solver, nrow(X), taus)
+  solver <- resolve_qr_solver(solver, effective_n, taus)
+  frequency_expanded <- FALSE
+  if (solver %in% c("onestep", "cuda_admm") && any(frequency != 1)) {
+    expanded_index <- rep.int(seq_along(y), as.integer(frequency))
+    X <- X[expanded_index, , drop = FALSE]
+    y <- y[expanded_index]
+    weights <- weights[expanded_index]
+    frequency <- rep(1, length(expanded_index))
+    frequency_expanded <- TRUE
+  }
+  weights <- normalize_weights(weights * frequency) *
+    (as.numeric(effective_n) / length(weights))
   custom_solver <- custom_registry_entry("qr", solver)
   weighted_X <- X * weights
   weighted_y <- y * weights
@@ -455,7 +501,8 @@ fit_weighted_qr <- function(
         weights,
         taus,
         first_solver = onestep_first_solver,
-        bandwidth_method = onestep_bandwidth
+        bandwidth_method = onestep_bandwidth,
+        effective_n = effective_n
       )
     )
     if (length(fit$warnings)) {
@@ -516,6 +563,8 @@ fit_weighted_qr <- function(
     solver_process_aware = qr_solver_registry()$process_aware[
       match(solver, qr_solver_registry()$solver)
     ],
+    frequency_effective_n = as.numeric(effective_n),
+    frequency_expanded = frequency_expanded,
     taus = taus,
     coefficients = coefficients,
     conditioned_coefficients = conditioned_coefficients,

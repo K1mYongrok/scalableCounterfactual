@@ -22,7 +22,9 @@ counterfactual_decompose(
 )
 }
 \arguments{
-\item{formula}{Outcome and covariate formula.}
+\item{formula}{Outcome and covariate formula. The formula must include an
+intercept. Intercept-only formulas are supported for all models except
+Cox regression, which also requires at least one covariate.}
 
 \item{data}{Data frame containing analysis variables.}
 
@@ -35,8 +37,9 @@ and one is the comparison group.}
 `cox`, `logit`, `probit`, `cloglog`, or `lpm`.}
 
 \item{solver}{QR solver: `br`, `fn`, `pfn`, `qfnb`, `pfnb`, `proqreg`,
-`profn`, `onestep`, or `auto`. CQR accepts the exact solvers `br`, `fn`,
-`pfn`, `qfnb`, `pfnb`, and `auto`. Leave `NULL` for other models.}
+`profn`, `onestep`, experimental `cuda_admm`, or `auto`. CQR accepts the
+exact solvers `br`, `fn`, `pfn`, `qfnb`, `pfnb`, and `auto`. Leave `NULL`
+for other models.}
 
 \item{control}{A [cf_control()] object.}
 

@@ -1,0 +1,16 @@
+position,column,storage,meaning
+1,distribution,character,Evaluated factual or counterfactual distribution
+2,method,character,Resolved marginalization and noncrossing method
+3,passes,integer,Number of full or chunked prediction passes
+4,histogram_bins,integer_or_na,Histogram bins used by chunked QR marginalization
+5,candidate_draws,double_or_na,Candidate draws retained or processed
+6,estimated_matrix_mb,double,Estimated full prediction matrix size in megabytes
+7,boundary_quantiles,integer,Requested quantiles beyond identified support
+8,identified_cdf_max,double_or_na,Largest identified CDF probability for duration models
+9,dr_noncrossing,character_or_na,Distribution-regression monotonicity policy
+10,dr_raw_crossing_pairs,integer_or_na,Adjacent CDF threshold crossings before bounding or correction
+11,dr_raw_max_crossing,double_or_na,Largest raw adjacent CDF crossing
+12,dr_out_of_bounds_values,integer_or_na,Raw fitted CDF values outside zero and one
+13,dr_max_bound_adjustment,double_or_na,Largest adjustment used to enforce probability bounds
+14,dr_corrected_crossing_pairs,integer_or_na,Adjacent crossings after probability bounding and correction
+15,dr_max_adjustment,double_or_na,Largest total adjustment from raw fitted to final CDF

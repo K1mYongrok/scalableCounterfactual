@@ -127,6 +127,20 @@ active_extension_fingerprint <- function(model, solver, control, point = NULL) {
     } else {
       solver
     }
+    if (identical(model, "cqr")) {
+      resolved_selection <- if (!is.null(point) && length(point$fits)) {
+        unique(vapply(
+          point$fits,
+          function(fit) fit$selection_backend %||% control$dr_backend,
+          character(1L)
+        ))
+      } else {
+        control$dr_backend
+      }
+      selection$distribution <- unique(c(
+        control$dr_backend, resolved_selection
+      ))
+    }
   } else if (model %in% c("loc", "locsca", "lpm")) {
     selection$linear <- if (!is.null(point) && length(point$fits)) {
       unique(vapply(point$fits, `[[`, character(1L), "backend"))

@@ -29,9 +29,44 @@ gaussian_true_decomposition <- function(parameters, quantiles) {
   )
 }
 
+simulation_seed_stream <- function(scenario) {
+  scenario_id <- match(scenario, names(simulation_scenarios()))
+  if (is.na(scenario_id)) {
+    stop("unsupported simulation scenario: ", scenario, call. = FALSE)
+  }
+  as.integer(scenario_id + 2L)
+}
+
+simulation_attempt_seed <- function(task, attempt) {
+  bootstrap_attempt_seed(
+    task$master_seed,
+    task$replication,
+    attempt,
+    stream = simulation_seed_stream(task$scenario)
+  )
+}
+
+simulation_mean_elapsed <- function(values) {
+  values <- as.numeric(values)
+  values <- values[is.finite(values)]
+  if (length(values)) mean(values) else NA_real_
+}
+
+simulation_control <- function(task) {
+  cf_control(
+    nreg = task$nreg,
+    trimming = task$trimming,
+    reported_quantiles = task$reported_quantiles,
+    bootstrap_scheme = task$bootstrap_scheme,
+    bootstrap_progress = FALSE,
+    crossing_diagnostics = FALSE,
+    marginal_method = "matrix"
+  )
+}
+
 simulation_checkpoint_signature <- function(task) {
   object_md5(list(
-    schema_version = 1L,
+    schema_version = 4L,
     package_version = as.character(
       utils::packageVersion("scalableCounterfactual")
     ),
@@ -47,13 +82,90 @@ simulation_checkpoint_signature <- function(task) {
     bootstrap_reps = task$bootstrap_reps,
     bootstrap_scheme = task$bootstrap_scheme,
     master_seed = task$master_seed,
+    seed_strategy = "scenario-replication-attempt-v1",
+    seed_stream = simulation_seed_stream(task$scenario),
     max_retries = task$max_retries,
     task_timeout_seconds = task$task_timeout_seconds,
     extension_registry = extension_registry_fingerprint(list(
       qr = intersect(task$solver, names(registry_snapshot()$qr)),
       linear = character(), distribution = character()
-    ))
+    )),
+    runtime = bootstrap_runtime_identity(
+      "qr", task$solver, simulation_control(task)
+    )
   ))
+}
+
+valid_simulation_checkpoint <- function(existing, signature, task) {
+  tryCatch({
+  required <- c(
+    "status", "error", "elapsed", "rows", "identity_residual", "attempt",
+    "seed", "cached", "signature", "attempt_failures"
+  )
+  expected_effects <- c("structure", "composition", "total")
+  expected_rows <- 3L * length(task$reported_quantiles)
+  failures_valid <- function(failures) {
+    if (!is.data.frame(failures)) return(FALSE)
+    if (!nrow(failures)) return(TRUE)
+    required_failures <- c(
+      "scenario", "replication", "attempt", "seed", "error"
+    )
+    all(required_failures %in% names(failures)) &&
+      is.character(failures$scenario) &&
+      is.numeric(failures$replication) &&
+      is.numeric(failures$attempt) && is.numeric(failures$seed) &&
+      is.character(failures$error) &&
+      all(failures$scenario == task$scenario) &&
+      all(failures$replication == task$replication) &&
+      all(is.finite(failures$attempt) & failures$attempt >= 0) &&
+      all(is.finite(failures$seed)) && all(nzchar(failures$error))
+  }
+  valid <- is.list(existing) && all(required %in% names(existing)) &&
+    identical(existing$signature, signature) &&
+    identical(existing$status, "ok") &&
+    is.numeric(existing$elapsed) && length(existing$elapsed) == 1L &&
+    is.finite(existing$elapsed) && existing$elapsed >= 0 &&
+    is.numeric(existing$identity_residual) &&
+    length(existing$identity_residual) == 1L &&
+    is.finite(existing$identity_residual) && existing$identity_residual >= 0 &&
+    is.integer(existing$attempt) && length(existing$attempt) == 1L &&
+    !is.na(existing$attempt) && existing$attempt >= 0L &&
+    is.integer(existing$seed) && length(existing$seed) == 1L &&
+    !is.na(existing$seed) && is.logical(existing$cached) &&
+    length(existing$cached) == 1L && !is.na(existing$cached) &&
+    failures_valid(existing$attempt_failures) &&
+    is.data.frame(existing$rows) && nrow(existing$rows) == expected_rows &&
+    all(c(
+      "scenario", "replication", "quantile", "effect", "truth", "estimate",
+      "error", "squared_error", "pointwise_covered", "uniform_curve_covered"
+    ) %in% names(existing$rows)) &&
+    all(existing$rows$scenario == task$scenario) &&
+    all(existing$rows$replication == task$replication) &&
+    setequal(unique(existing$rows$effect), expected_effects) &&
+    all(vapply(expected_effects, function(effect) {
+      observed <- existing$rows$quantile[existing$rows$effect == effect]
+      identical(as.numeric(observed), as.numeric(task$reported_quantiles))
+    }, logical(1L))) &&
+    is.character(existing$rows$scenario) &&
+    is.numeric(existing$rows$replication) &&
+    is.numeric(existing$rows$quantile) &&
+    is.character(existing$rows$effect) &&
+    is.numeric(existing$rows$truth) &&
+    is.numeric(existing$rows$estimate) &&
+    is.numeric(existing$rows$error) &&
+    is.numeric(existing$rows$squared_error) &&
+    is.logical(existing$rows$pointwise_covered) &&
+    is.logical(existing$rows$uniform_curve_covered) &&
+    all(is.finite(existing$rows$quantile)) &&
+    all(is.finite(existing$rows$truth)) &&
+    all(is.finite(existing$rows$estimate)) &&
+    all(is.finite(existing$rows$error)) &&
+    all(is.finite(existing$rows$squared_error)) &&
+    all(existing$rows$squared_error >= 0) &&
+    all(!is.nan(existing$rows$pointwise_covered)) &&
+    all(!is.nan(existing$rows$uniform_curve_covered))
+  isTRUE(valid)
+  }, error = function(error) FALSE)
 }
 
 run_simulation_attempt <- function(task) {
@@ -69,7 +181,7 @@ run_simulation_task <- function(task) {
   path <- task$checkpoint_path
   if (!is.null(path) && file.exists(path)) {
     existing <- tryCatch(readRDS(path), error = function(e) NULL)
-    if (!is.null(existing) && identical(existing$signature, signature)) {
+    if (valid_simulation_checkpoint(existing, signature, task)) {
       existing$cached <- TRUE
       return(existing)
     }
@@ -77,9 +189,7 @@ run_simulation_task <- function(task) {
   failures <- list()
   for (attempt in 0:task$max_retries) {
     attempt_task <- task
-    attempt_task$seed <- bootstrap_attempt_seed(
-      task$master_seed, task$task_id, attempt, stream = 3L
-    )
+    attempt_task$seed <- simulation_attempt_seed(task, attempt)
     result <- tryCatch(
       run_simulation_attempt(attempt_task),
       error = function(error) list(
@@ -139,15 +249,7 @@ run_simulation_replication <- function(task) {
     weights = "weight",
     model = "qr",
     solver = task$solver,
-    control = cf_control(
-      nreg = task$nreg,
-      trimming = task$trimming,
-      reported_quantiles = task$reported_quantiles,
-      bootstrap_scheme = task$bootstrap_scheme,
-      bootstrap_progress = FALSE,
-      crossing_diagnostics = FALSE,
-      marginal_method = "matrix"
-    ),
+    control = simulation_control(task),
     bootstrap_reps = task$bootstrap_reps,
     point_workers = 1L,
     bootstrap_workers = 1L,
@@ -251,7 +353,7 @@ simulate_counterfactual_validation <- function(
   bootstrap_reps <- assert_scalar_integer(
     bootstrap_reps, "bootstrap_reps", 0L
   )
-  workers <- assert_scalar_integer(workers, "workers", 1L)
+  workers_requested <- assert_scalar_integer(workers, "workers", 1L)
   seed <- assert_scalar_integer(seed, "seed", 1L)
   max_retries <- assert_scalar_integer(max_retries, "max_retries", 0L)
   if (length(task_timeout_seconds) != 1L || is.na(task_timeout_seconds) ||
@@ -312,6 +414,14 @@ simulate_counterfactual_validation <- function(
         )
       )
     }
+  }
+  workers <- min(workers_requested, length(tasks))
+  if (identical(solver, "cuda_admm") && workers > 1L) {
+    stop(
+      "cuda_admm simulation validation requires one effective worker to avoid ",
+      "multiple R processes oversubscribing one GPU",
+      call. = FALSE
+    )
   }
   started <- proc.time()[["elapsed"]]
   if (workers == 1L) {
@@ -377,12 +487,15 @@ simulate_counterfactual_validation <- function(
       } else mean(uniform_curve_covered, na.rm = TRUE)
     ), by = .(scenario, effect)]
   } else data.table::data.table()
+  task_elapsed <- vapply(results, function(result) {
+    as.numeric(result$elapsed %||% NA_real_)
+  }, numeric(1L))
   resources <- data.frame(
     tasks = length(tasks),
     successful_tasks = sum(successful),
     failed_tasks = sum(!successful),
     elapsed_seconds = unname(elapsed),
-    mean_task_seconds = mean(vapply(results, `[[`, numeric(1L), "elapsed")),
+    mean_task_seconds = simulation_mean_elapsed(task_elapsed),
     cached_tasks = sum(vapply(results, `[[`, logical(1L), "cached")),
     retry_attempts = sum(vapply(results, `[[`, integer(1L), "attempt")),
     maximum_identity_residual = if (any(successful)) {
@@ -409,6 +522,7 @@ simulate_counterfactual_validation <- function(
       weighted = weighted,
       bootstrap_reps = bootstrap_reps,
       bootstrap_scheme = bootstrap_scheme,
+      workers_requested = workers_requested,
       workers = workers,
       seed = seed,
       checkpoint_dir = if (is.null(checkpoint_dir)) NA_character_ else
@@ -447,7 +561,14 @@ write_simulation_validation <- function(object, output_dir) {
   if (!inherits(object, "cf_simulation_validation")) {
     stop("object must be a cf_simulation_validation result", call. = FALSE)
   }
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  managed_files <- c(
+    "summary.csv", "raw.csv", "resources.csv", "curve_coverage.csv",
+    "failures.csv", "simulation_validation.rds"
+  )
+  atomic_write_output_files(
+    output_dir, managed_files,
+    required_files = setdiff(managed_files, "failures.csv"),
+    writer = function(output_dir) {
   data.table::fwrite(object$summary, file.path(output_dir, "summary.csv"))
   data.table::fwrite(object$raw, file.path(output_dir, "raw.csv"))
   data.table::fwrite(object$resources, file.path(output_dir, "resources.csv"))
@@ -461,5 +582,7 @@ write_simulation_validation <- function(object, output_dir) {
   }
   saveRDS(object, file.path(output_dir, "simulation_validation.rds"),
           compress = "xz")
+    }
+  )
   invisible(output_dir)
 }

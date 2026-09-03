@@ -11,6 +11,11 @@ For a fair comparison it freezes:
 - conditional and reported quantile grids;
 - the point-estimation worker count.
 
+The requested point-worker count is recorded separately from the effective
+count, which is capped at two group fits. Distribution-regression backend
+comparisons also report each group's conditional-grid size and effective
+threshold-worker count; the combined field is missing when the two differ.
+
 Each solver receives a stable solver-specific random seed, so PFNB/PFN
 preprocessing is reproducible and does not depend on execution order.
 Optional stratified subsampling preserves the requested total size while
@@ -33,9 +38,19 @@ parent process RSS is sampled at a configurable interval. Use
 included in the parent RSS field. Reports should still state CPU, RAM, R and
 package versions, poll interval, sample sizes, quantile grid, and worker count.
 
+Scaling checkpoints include the R/platform, BLAS/LAPACK, package, extension,
+and applicable GPU runtime identity. Their row keys and stored fit shapes are
+validated before reuse. Resumption uses absolute warmup-plus-repetition indices
+so the recorded execution order matches an uninterrupted run. An all-missing
+RSS condition remains `NA`.
+
 Solvers may differ in numerical robustness. In particular, a solver failure is
 reported as a result and is never replaced silently by another backend.
 Warnings, diagnostic availability, preconditioning method, and condition
 estimates are also recorded. For BR, FN, and PFN, the low-level quantreg return
 objects do not expose convergence flags; the benchmark reports this as missing
 rather than as zero failures.
+
+CLI raw and summary tables are staged and committed together. Input, raw,
+summary, and checkpoint paths must be distinct, which prevents a failed or
+misconfigured benchmark from overwriting its source data.

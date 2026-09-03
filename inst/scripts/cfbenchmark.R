@@ -5,13 +5,12 @@ suppressPackageStartupMessages({
   library(scalableCounterfactual)
 })
 
-as_bool <- function(x) {
-  normalized <- tolower(as.character(x))
-  if (!normalized %in% c("1", "0", "true", "false", "yes", "no", "y", "n")) {
-    stop("expected a true/false value, got: ", x, call. = FALSE)
-  }
-  normalized %in% c("1", "true", "yes", "y")
-}
+script_file <- sub(
+  "^--file=", "",
+  grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[[1L]]
+)
+source(file.path(dirname(normalizePath(script_file)), "_cli_common.R"))
+rm(script_file)
 
 usage <- function() {
   cat(paste(
@@ -71,10 +70,17 @@ nreg <- value(args, "nreg", 100L, as.integer)
 trimming <- value(args, "trimming", 0.005, as.numeric)
 seed <- value(args, "seed", 20260719L, as.integer)
 point_workers <- value(args, "point_workers", 1L, as.integer)
-repetitions <- value(args, "repetitions", 1L, as.integer)
-warmup <- value(args, "warmup", 0L, as.integer)
+repetitions <- value(args, "repetitions", 5L, as.integer)
+warmup <- value(args, "warmup", 1L, as.integer)
 qr_precondition <- value(args, "qr_precondition", TRUE, as_bool)
 output_path <- value(args, "output", "output/qr_solvers.csv")
+summary_path <- sub("\\.csv$", "_summary.csv", output_path, ignore.case = TRUE)
+if (identical(summary_path, output_path)) summary_path <- paste0(output_path, "_summary.csv")
+assert_distinct_cli_paths(list(
+  input_data = data_path,
+  benchmark_output = output_path,
+  summary_output = summary_path
+))
 
 message("Reading ", data_path)
 data <- read_analysis_data(data_path)
@@ -98,11 +104,15 @@ benchmark <- benchmark_qr_solvers_repeated(
   randomize_order = TRUE
 )
 
-dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
-fwrite(benchmark$raw, output_path)
-summary_path <- sub("\\.csv$", "_summary.csv", output_path, ignore.case = TRUE)
-if (identical(summary_path, output_path)) summary_path <- paste0(output_path, "_summary.csv")
-fwrite(benchmark$summary, summary_path)
+scalableCounterfactual:::atomic_write_output_files(
+  dirname(output_path),
+  c(basename(output_path), basename(summary_path)),
+  required_files = c(basename(output_path), basename(summary_path)),
+  writer = function(stage) {
+    fwrite(benchmark$raw, file.path(stage, basename(output_path)))
+    fwrite(benchmark$summary, file.path(stage, basename(summary_path)))
+  }
+)
 print(benchmark$summary)
 message("Benchmark written to ", normalizePath(output_path, winslash = "/"))
 message("Summary written to ", normalizePath(summary_path, winslash = "/"))

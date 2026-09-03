@@ -1,15 +1,31 @@
 # Cox fitting is delegated to survival; weighted Breslow and Kaplan-Meier
 # distribution calculations are implemented here. See inst/provenance/METHODS.md.
-fit_weighted_cox <- function(X, y, weights, event = NULL) {
+fit_weighted_cox <- function(
+    X, y, weights, event = NULL, frequency = NULL) {
   X <- as.matrix(X)
   y <- as.numeric(y)
-  weights <- normalize_weights(weights)
+  weights <- as.numeric(weights)
   if (is.null(event)) event <- rep(1L, length(y))
   event <- as.integer(event)
   if (nrow(X) != length(y) || length(weights) != length(y) ||
       length(event) != length(y)) {
     stop("Cox inputs have incompatible sizes", call. = FALSE)
   }
+  if (is.null(frequency)) frequency <- rep(1, length(y))
+  frequency <- as.numeric(frequency)
+  if (length(frequency) != length(y) || any(!is.finite(frequency)) ||
+      any(frequency < 1) || any(frequency != floor(frequency))) {
+    stop(
+      "frequency must contain one positive integer per row",
+      call. = FALSE
+    )
+  }
+  effective_n <- sum(frequency)
+  if (!is.finite(effective_n) || effective_n > .Machine$integer.max) {
+    stop("sum(frequency) exceeds the supported row limit", call. = FALSE)
+  }
+  weights <- normalize_weights(weights * frequency) *
+    (as.numeric(effective_n) / length(weights))
   if (any(y < 0)) {
     stop("Cox duration regression requires a nonnegative outcome", call. = FALSE)
   }
@@ -105,7 +121,8 @@ fit_weighted_cox <- function(X, y, weights, event = NULL) {
     iterations = cox_iterations,
     converged = convergence_flag == 0L,
     convergence_flag = convergence_flag,
-    event_count = sum(event == 1L),
+    event_count = sum(frequency[event == 1L]),
+    frequency_effective_n = as.numeric(effective_n),
     warnings = unique(fit_warnings)
   ), class = c("cf_cox_fit", "cf_conditional_fit"))
 }
@@ -118,7 +135,8 @@ cox_relative_risk <- function(fit, X) {
 
 cox_boundary_result <- function(
     probs, upper_cdf, identified, final_time, policy, context) {
-  boundary <- probs > upper_cdf
+  tolerance <- weighted_rank_tolerance(1)
+  boundary <- probs > upper_cdf + tolerance
   if (any(boundary) && identical(policy, "error")) {
     stop(
       context, " quantile(s) above the identified CDF limit ",
@@ -151,7 +169,7 @@ weighted_km_quantiles <- function(
   cdf <- 1 - survival
   upper_cdf <- cdf[[length(cdf)]]
   identified <- vapply(probs, function(probability) {
-    hit <- which(cdf >= probability)[1L]
+    hit <- which(cdf >= probability - weighted_rank_tolerance(1))[1L]
     if (is.na(hit)) NA_real_ else event_times[[hit]]
   }, numeric(1L))
   resolved <- cox_boundary_result(
@@ -185,12 +203,15 @@ cox_marginal_quantiles <- function(
   }
   upper_cdf <- evaluate_index(length(hazards))
   identified <- vapply(probs, function(probability) {
-    if (probability > upper_cdf) return(NA_real_)
+    tolerance <- weighted_rank_tolerance(1)
+    if (probability > upper_cdf + tolerance) return(NA_real_)
     lower <- 1L
     upper <- length(hazards)
     while (lower < upper) {
       middle <- as.integer(floor((lower + upper) / 2))
-      if (evaluate_index(middle) >= probability) upper <- middle else {
+      if (evaluate_index(middle) >= probability - tolerance) {
+        upper <- middle
+      } else {
         lower <- middle + 1L
       }
     }

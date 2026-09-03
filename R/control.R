@@ -2,7 +2,8 @@
 #'
 #' @param nreg Number of conditional quantile regressions or distribution
 #'   regression thresholds.
-#' @param trimming QR tail trimming fraction.
+#' @param trimming QR tail trimming fraction. CQR, location, and location-scale
+#'   models retain the full midpoint grid.
 #' @param reported_quantiles Quantiles of the marginal distributions to report.
 #' @param alpha Inference significance level.
 #' @param weighted_bootstrap Deprecated logical compatibility argument. `TRUE`
@@ -54,6 +55,13 @@
 #'   quantiles within each covariate row. Rearrangement removes crossing while
 #'   preserving the conditional draw distribution and hence the reported
 #'   counterfactual marginal quantiles.
+#' @param dr_noncrossing Distribution-regression CDF monotonicity correction.
+#'   `cummax` preserves the version 1.0 running-maximum rule. `rearrange`
+#'   applies the increasing rearrangement used by `Counterfactual` 1.2,
+#'   `isotonic` applies an
+#'   equal-weight isotonic projection over outcome thresholds, and `none`
+#'   disables monotonicity correction. All policies enforce `[0, 1]`
+#'   probability bounds before inversion.
 #' @param cqr_right Whether `cqr` uses right rather than left censoring.
 #' @param cqr_nsteps Number of censored-QR selection/refitting steps; at least
 #'   three.
@@ -68,9 +76,9 @@
 #' @param linear_backend Weighted least-squares backend for `loc`, `locsca`,
 #'   and `lpm`: robust base-R QR, Cholesky, RcppEigen-backed `fastglm`, or
 #'   `auto` (currently QR for backward-compatible numerical robustness).
-#' @param dr_backend Binary-response backend for logit, probit, and cloglog distribution
-#'   regression: base-R `glm`, `fastglm`, `speedglm`, or `auto` (currently
-#'   `fastglm` when installed and base-R GLM otherwise).
+#' @param dr_backend Binary-response backend for logit, probit, and cloglog
+#'   distribution regression: base-R `glm`, `fastglm`, `speedglm`, CUDA, or
+#'   `auto` (currently `fastglm` when installed and base-R GLM otherwise).
 #' @param dr_workers Workers used across distribution-regression thresholds.
 #'   This execution layer cannot be combined with group-level or
 #'   replication-level parallelism.
@@ -143,7 +151,8 @@ cf_control <- function(
     gpu_qr_rho = 1,
     gpu_qr_maxit = 5000L,
     gpu_qr_tolerance = 1e-6,
-    gpu_qr_allow_nonconvergence = FALSE) {
+    gpu_qr_allow_nonconvergence = FALSE,
+    dr_noncrossing = c("cummax", "rearrange", "isotonic", "none")) {
   nreg <- assert_scalar_integer(nreg, "nreg", 3L)
   trimming <- assert_probability(trimming, "trimming", open = FALSE)
   if (trimming >= 0.5) stop("trimming must be less than 0.5", call. = FALSE)
@@ -210,6 +219,7 @@ cf_control <- function(
     stop("crossing_tolerance must be a nonnegative finite scalar", call. = FALSE)
   }
   quantile_noncrossing <- match.arg(quantile_noncrossing)
+  dr_noncrossing <- match.arg(dr_noncrossing)
   cqr_right <- assert_scalar_logical(cqr_right, "cqr_right")
   cqr_nsteps <- assert_scalar_integer(cqr_nsteps, "cqr_nsteps", 3L)
   cqr_first_cut <- assert_probability(cqr_first_cut, "cqr_first_cut")
@@ -259,7 +269,8 @@ cf_control <- function(
   onestep_first_solver <- match.arg(onestep_first_solver)
   onestep_bandwidth <- match.arg(onestep_bandwidth)
   qr_bootstrap_engine <- match.arg(qr_bootstrap_engine)
-  conditional_quantiles <- (seq_len(nreg) - 0.5) / nreg
+  full_conditional_quantiles <- (seq_len(nreg) - 0.5) / nreg
+  conditional_quantiles <- full_conditional_quantiles
   conditional_quantiles <- conditional_quantiles[
     conditional_quantiles >= trimming &
       conditional_quantiles <= 1 - trimming
@@ -270,6 +281,7 @@ cf_control <- function(
   structure(list(
     nreg = nreg,
     trimming = trimming,
+    full_conditional_quantiles = full_conditional_quantiles,
     conditional_quantiles = conditional_quantiles,
     reported_quantiles = reported_quantiles,
     alpha = alpha,
@@ -298,6 +310,7 @@ cf_control <- function(
     crossing_diagnostics = crossing_diagnostics,
     crossing_tolerance = as.numeric(crossing_tolerance),
     quantile_noncrossing = quantile_noncrossing,
+    dr_noncrossing = dr_noncrossing,
     cqr_right = cqr_right,
     cqr_nsteps = cqr_nsteps,
     cqr_first_cut = cqr_first_cut,
@@ -328,7 +341,8 @@ validate_cf_control <- function(control) {
     stop("control must be created by cf_control()", call. = FALSE)
   }
   required <- c(
-    "nreg", "trimming", "conditional_quantiles", "reported_quantiles",
+    "nreg", "trimming", "full_conditional_quantiles",
+    "conditional_quantiles", "reported_quantiles",
     "alpha", "bootstrap_scheme", "legacy_qr_shift",
     "legacy_weighted_quantile", "qr_precondition",
     "onestep_first_solver", "onestep_bandwidth", "qr_bootstrap_engine",
@@ -336,6 +350,7 @@ validate_cf_control <- function(control) {
     "marginal_method", "marginal_chunk_rows", "marginal_matrix_max_mb",
     "marginal_histogram_bins", "marginal_candidate_max",
     "crossing_diagnostics", "crossing_tolerance", "quantile_noncrossing",
+    "dr_noncrossing",
     "cqr_right", "cqr_nsteps", "cqr_first_cut", "cqr_later_cut",
     "cox_boundary", "linear_backend",
     "dr_backend", "dr_workers",

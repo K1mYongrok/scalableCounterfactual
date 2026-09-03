@@ -159,37 +159,63 @@ plot.cfdecomp <- function(
   if (!is.null(main)) graphics::par(oma = c(0, 0, 2, 0))
   plotted <- vector("list", length(effects))
   names(plotted) <- effects
+  plot_arguments <- list(...)
+  supplied_ylim <- plot_arguments$ylim
+  plot_arguments$type <- NULL
+  plot_arguments$ylim <- NULL
   for (i in seq_along(effects)) {
     effect <- effects[[i]]
     selected <- x$results[x$results$effect == effect, , drop = FALSE]
     selected <- selected[order(selected$quantile), , drop = FALSE]
     lower_name <- paste0(interval, "_lower")
     upper_name <- paste0(interval, "_upper")
-    has_interval <- interval != "none" &&
-      all(is.finite(selected[[lower_name]])) &&
-      all(is.finite(selected[[upper_name]]))
+    interval_rows <- rep(FALSE, nrow(selected))
+    if (interval != "none") {
+      interval_rows <- is.finite(selected[[lower_name]]) &
+        is.finite(selected[[upper_name]])
+    }
+    has_interval <- any(interval_rows)
     y_values <- selected$estimate
     if (has_interval) {
-      y_values <- c(y_values, selected[[lower_name]], selected[[upper_name]])
+      y_values <- c(
+        y_values,
+        selected[[lower_name]][interval_rows],
+        selected[[upper_name]][interval_rows]
+      )
     }
-    graphics::plot.default(
-      selected$quantile,
-      selected$estimate,
+    panel_ylim <- supplied_ylim %||% range(c(0, y_values), finite = TRUE)
+    do.call(graphics::plot.default, c(list(
+      x = selected$quantile,
+      y = selected$estimate,
       type = "n",
       xlab = xlab,
       ylab = ylab,
       main = effect,
-      ylim = range(c(0, y_values), finite = TRUE),
-      ...
-    )
+      ylim = panel_ylim
+    ), plot_arguments))
     graphics::abline(h = 0, lty = 2, col = "grey45")
     if (has_interval) {
-      graphics::polygon(
-        c(selected$quantile, rev(selected$quantile)),
-        c(selected[[lower_name]], rev(selected[[upper_name]])),
-        border = NA,
-        col = grDevices::adjustcolor(colors[[i]], alpha.f = 0.18)
-      )
+      indices <- which(interval_rows)
+      interval_runs <- split(indices, cumsum(c(TRUE, diff(indices) > 1L)))
+      for (run in interval_runs) {
+        if (length(run) == 1L) {
+          graphics::segments(
+            selected$quantile[run], selected[[lower_name]][run],
+            selected$quantile[run], selected[[upper_name]][run],
+            col = grDevices::adjustcolor(colors[[i]], alpha.f = 0.35)
+          )
+        } else {
+          graphics::polygon(
+            c(selected$quantile[run], rev(selected$quantile[run])),
+            c(
+              selected[[lower_name]][run],
+              rev(selected[[upper_name]][run])
+            ),
+            border = NA,
+            col = grDevices::adjustcolor(colors[[i]], alpha.f = 0.18)
+          )
+        }
+      }
     }
     graphics::lines(
       selected$quantile, selected$estimate,
@@ -213,7 +239,21 @@ plot.cfdecomp <- function(
 #' @export
 write_cf_outputs <- function(object, output_dir) {
   if (!inherits(object, "cfdecomp")) stop("object must be cfdecomp", call. = FALSE)
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  managed_files <- c(
+    "decomposition.csv", "distribution_diagnostics.csv",
+    "point_resources.csv", "marginalization_diagnostics.csv",
+    "run_metadata.csv", "fit.rds", "bootstrap_resources.csv",
+    "bootstrap_failures.csv", "functional_effect_tests.csv",
+    "quantile_crossing_diagnostics.csv"
+  )
+  atomic_write_output_files(
+    output_dir, managed_files,
+    required_files = c(
+      "decomposition.csv", "distribution_diagnostics.csv",
+      "point_resources.csv", "marginalization_diagnostics.csv",
+      "run_metadata.csv", "fit.rds"
+    ),
+    writer = function(output_dir) {
   optional_outputs <- file.path(output_dir, c(
     "bootstrap_resources.csv", "bootstrap_failures.csv",
     "functional_effect_tests.csv",
@@ -272,5 +312,7 @@ write_cf_outputs <- function(object, output_dir) {
     )
   }
   saveRDS(object, file.path(output_dir, "fit.rds"), compress = "xz")
+    }
+  )
   invisible(output_dir)
 }

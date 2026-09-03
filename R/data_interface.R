@@ -36,48 +36,143 @@ coerce_binary_group <- function(group) {
   as.integer(group)
 }
 
-reduce_common_design <- function(X0, X1, tolerance = 1e-10) {
-  columns <- colnames(X0)
-  intercept <- match("(Intercept)", columns)
-  keep <- rep(TRUE, length(columns))
+dependency_representation <- function(X, tolerance) {
+  scales <- apply(abs(X), 2L, max)
+  scales[!is.finite(scales) | scales == 0] <- 1
+  scaled <- sweep(X, 2L, scales, "/")
+  decomposition <- qr(scaled, tol = tolerance, LAPACK = FALSE)
+  upper <- qr.R(decomposition, complete = FALSE)
+  represented <- matrix(0, nrow = nrow(upper), ncol = ncol(X))
+  represented[, decomposition$pivot] <- upper
+  represented
+}
 
-  has_variation <- function(x) {
-    values <- range(x, finite = TRUE)
-    length(values) == 2L && is.finite(values[[1L]]) &&
-      is.finite(values[[2L]]) && (values[[2L]] - values[[1L]]) > tolerance
+matroid_exchange_information <- function(representation, selected, outside,
+                                         tolerance) {
+  if (!length(outside)) {
+    return(list(addable = logical(), exchangeable = matrix(
+      FALSE, nrow = length(selected), ncol = 0L
+    )))
+  }
+  if (!length(selected)) {
+    norms <- sqrt(colSums(representation[, outside, drop = FALSE]^2))
+    return(list(
+      addable = norms > tolerance,
+      exchangeable = matrix(FALSE, nrow = 0L, ncol = length(outside))
+    ))
   }
 
-  for (j in seq_along(columns)) {
-    if (j != intercept &&
-        (!has_variation(X0[, j]) || !has_variation(X1[, j]))) {
-      keep[[j]] <- FALSE
-    }
+  basis <- representation[, selected, drop = FALSE]
+  candidates <- representation[, outside, drop = FALSE]
+  decomposition <- qr(basis, tol = tolerance, LAPACK = FALSE)
+  coefficients <- qr.coef(decomposition, candidates)
+  coefficients <- matrix(
+    coefficients, nrow = length(selected), ncol = length(outside)
+  )
+  residuals <- candidates - basis %*% coefficients
+  candidate_norms <- sqrt(colSums(candidates^2))
+  residual_norms <- sqrt(colSums(residuals^2))
+  addable <- residual_norms > tolerance * pmax(1, candidate_norms)
+
+  coefficient_scale <- pmax(1, apply(abs(coefficients), 2L, max))
+  exchangeable <- abs(coefficients) >
+    tolerance * rep(coefficient_scale, each = nrow(coefficients))
+  if (any(addable)) exchangeable[, addable] <- TRUE
+  list(addable = addable, exchangeable = exchangeable)
+}
+
+maximum_common_independent_columns <- function(
+    representation0, representation1, intercept, tolerance) {
+  column_count <- ncol(representation0)
+  selected <- if (length(intercept) && !is.na(intercept) && intercept > 0L) {
+    intercept
+  } else {
+    integer()
   }
 
   repeat {
-    active <- which(keep)
-    dependent <- integer()
-    for (matrix_group in list(X0[, active, drop = FALSE],
-                              X1[, active, drop = FALSE])) {
-      qr_fit <- qr(matrix_group, tol = tolerance, LAPACK = FALSE)
-      if (qr_fit$rank < ncol(matrix_group)) {
-        aliased_local <- qr_fit$pivot[seq.int(qr_fit$rank + 1L,
-                                             ncol(matrix_group))]
-        dependent <- c(dependent, active[aliased_local])
+    outside <- setdiff(seq_len(column_count), selected)
+    if (!length(outside)) break
+    information0 <- matroid_exchange_information(
+      representation0, selected, outside, tolerance
+    )
+    information1 <- matroid_exchange_information(
+      representation1, selected, outside, tolerance
+    )
+    sources <- outside[information0$addable]
+    targets <- outside[information1$addable]
+    direct <- intersect(sources, targets)
+    if (length(direct)) {
+      selected <- sort(c(selected, direct[[1L]]))
+      next
+    }
+    if (!length(sources) || !length(targets)) break
+
+    parents <- rep(NA_integer_, column_count)
+    visited <- rep(FALSE, column_count)
+    queue <- sources
+    visited[sources] <- TRUE
+    target <- NA_integer_
+    head <- 1L
+    while (head <= length(queue) && is.na(target)) {
+      vertex <- queue[[head]]
+      head <- head + 1L
+      if (vertex %in% targets) {
+        target <- vertex
+        break
+      }
+      if (vertex %in% outside) {
+        column <- match(vertex, outside)
+        neighbours <- selected[information1$exchangeable[, column]]
+        neighbours <- setdiff(neighbours, intercept)
+      } else {
+        row <- match(vertex, selected)
+        neighbours <- outside[information0$exchangeable[row, ]]
+      }
+      neighbours <- neighbours[!visited[neighbours]]
+      if (length(neighbours)) {
+        parents[neighbours] <- vertex
+        visited[neighbours] <- TRUE
+        queue <- c(queue, neighbours)
       }
     }
-    dependent <- setdiff(unique(dependent), intercept)
-    if (!length(dependent)) break
-    keep[dependent] <- FALSE
-  }
+    if (is.na(target)) break
 
-  if (!keep[[intercept]]) {
+    path <- target
+    while (!is.na(parents[path[[length(path)]]])) {
+      path <- c(path, parents[path[[length(path)]]])
+    }
+    selected <- sort(setdiff(union(selected, path), intersect(selected, path)))
+  }
+  selected
+}
+
+reduce_common_design <- function(
+    X0, X1, tolerance = 1e-10,
+    effective_n0 = nrow(X0), effective_n1 = nrow(X1)) {
+  columns <- colnames(X0)
+  intercept <- match("(Intercept)", columns, nomatch = 0L)
+  representation0 <- dependency_representation(X0, tolerance)
+  representation1 <- dependency_representation(X1, tolerance)
+  retained_index <- maximum_common_independent_columns(
+    representation0, representation1, intercept, tolerance
+  )
+  keep <- seq_along(columns) %in% retained_index
+
+  if (intercept > 0L && !keep[[intercept]]) {
     stop("the intercept cannot be removed from the common design", call. = FALSE)
   }
-  if (sum(keep) < 2L) {
-    stop("no identified covariates remain after rank reduction", call. = FALSE)
+  if (sum(keep) < 1L) {
+    stop("no identified design columns remain after rank reduction", call. = FALSE)
   }
-  if (nrow(X0) <= sum(keep) || nrow(X1) <= sum(keep)) {
+  if (!is.numeric(effective_n0) || length(effective_n0) != 1L ||
+      !is.finite(effective_n0) || effective_n0 < nrow(X0) ||
+      !is.numeric(effective_n1) || length(effective_n1) != 1L ||
+      !is.finite(effective_n1) || effective_n1 < nrow(X1)) {
+    stop("effective group sizes must be finite and no smaller than stored rows",
+         call. = FALSE)
+  }
+  if (effective_n0 <= sum(keep) || effective_n1 <= sum(keep)) {
     stop("each group must have more observations than retained columns",
          call. = FALSE)
   }
@@ -91,7 +186,16 @@ reduce_common_design <- function(X0, X1, tolerance = 1e-10) {
 }
 
 reduce_prepared_design <- function(prepared) {
-  reduced <- reduce_common_design(prepared$X0, prepared$X1)
+  effective_n0 <- sum(
+    prepared$quantile_frequency0 %||% rep(1, nrow(prepared$X0))
+  )
+  effective_n1 <- sum(
+    prepared$quantile_frequency1 %||% rep(1, nrow(prepared$X1))
+  )
+  reduced <- reduce_common_design(
+    prepared$X0, prepared$X1,
+    effective_n0 = effective_n0, effective_n1 = effective_n1
+  )
   prepared$X0 <- reduced$X0
   prepared$X1 <- reduced$X1
   prepared$design_columns <- reduced$retained
@@ -114,6 +218,13 @@ prepare_cf_data <- function(
     drop.unused.levels = TRUE
   )
   terms_object <- stats::terms(model_frame)
+  if (length(attr(terms_object, "offset"))) {
+    stop(
+      "offset() terms are not supported; include the variable as an ordinary ",
+      "covariate or remove the offset",
+      call. = FALSE
+    )
+  }
   response <- stats::model.response(model_frame)
   if (!is.numeric(response)) {
     stop("the formula response must be numeric", call. = FALSE)
@@ -143,8 +254,9 @@ prepare_cf_data <- function(
   if (length(group_vector) != length(y) || length(weight_vector) != length(y)) {
     stop("formula, group, and weights must refer to the same rows", call. = FALSE)
   }
+  finite_design <- rowSums(!is.finite(X)) == 0L
   keep <- stats::complete.cases(X, y, group_vector, weight_vector) &
-    is.finite(y) & is.finite(weight_vector)
+    finite_design & is.finite(y) & is.finite(weight_vector)
   if (!is.null(censoring_vector)) {
     if (!is.numeric(censoring_vector)) {
       stop("censoring must be numeric", call. = FALSE)

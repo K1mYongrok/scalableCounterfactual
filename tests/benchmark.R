@@ -79,6 +79,33 @@ if (requireNamespace("fastglm", quietly = TRUE)) {
   stopifnot(max(dr_backends$max_abs_effect_difference) < 1e-5)
 }
 
+# Group-specific threshold counts and effective threshold workers are explicit.
+asymmetric <- data.frame(
+  y = c(rep(1, 60L), rep(1:6, each = 10L)),
+  x = stats::rnorm(120L),
+  group = rep(0:1, each = 60L),
+  weight = 1
+)
+asymmetric_backend <- suppressWarnings(benchmark_conditional_backends(
+  y ~ x, asymmetric, "group", "weight", model = "logit",
+  backends = "glm", reference_backend = "glm",
+  control = cf_control(
+    nreg = 9L, dr_workers = 2L, dr_warm_start = FALSE,
+    crossing_diagnostics = FALSE
+  ),
+  point_workers = 1L
+))
+stopifnot(
+  identical(asymmetric_backend$status, "ok"),
+  is.na(asymmetric_backend$conditional_grid_size),
+  identical(asymmetric_backend$conditional_grid_size_group0, 1L),
+  identical(asymmetric_backend$conditional_grid_size_group1, 6L),
+  identical(asymmetric_backend$threshold_workers_requested, 2L),
+  is.na(asymmetric_backend$threshold_workers),
+  identical(asymmetric_backend$threshold_workers_group0, 1L),
+  identical(asymmetric_backend$threshold_workers_group1, 2L)
+)
+
 if (requireNamespace("processx", quietly = TRUE)) {
   scaling_checkpoint <- tempfile("cf_scaling_checkpoint_", fileext = ".rds")
   isolated <- benchmark_qr_scaling(

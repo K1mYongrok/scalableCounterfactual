@@ -7,7 +7,17 @@ effect_test_statistics <- function(
   } else {
     apply(variance_draws, 2L, stats::var, na.rm = TRUE)
   }
-  variance <- variance + 1e-9
+  column_scale <- vapply(seq_len(ncol(bootstrap_numerator)), function(index) {
+    values <- c(
+      bootstrap_numerator[, index], observed_numerator[[index]],
+      variance_draws[, index]
+    )
+    values <- abs(values[is.finite(values)])
+    if (length(values)) max(values) else 0
+  }, numeric(1L))
+  variance_floor <- 64 * .Machine$double.eps * column_scale^2
+  variance <- pmax(variance, variance_floor)
+  variance[column_scale == 0] <- 1
   standardized_boot <- sweep(
     bootstrap_numerator^2, 2L, variance, "/"
   )
@@ -88,8 +98,12 @@ functional_effect_tests <- function(
     quantiles >= quantile_range[[1L]] & quantiles <= quantile_range[[2L]]
   )
   if (length(selected_requested) < 2L) {
-    stop("quantile_range must retain at least two reported quantiles",
-         call. = FALSE)
+    warning(
+      "Functional tests skipped: quantile_range retains fewer than two ",
+      "reported quantiles",
+      call. = FALSE
+    )
+    return(data.frame())
   }
   rows <- list()
   append_test <- function(...) {

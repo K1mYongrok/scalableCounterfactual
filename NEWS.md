@@ -1,3 +1,65 @@
+# scalableCounterfactual 1.1.0
+
+- Corrected bootstrap inference when successful draws have partial missing
+  support, and skipped automatic functional tests when fewer than two usable
+  quantiles are available.
+- Corrected the legacy weighted-bootstrap evaluation denominator and hardened
+  deterministic checkpoint identities against runtime, extension, and
+  simulation-scenario changes.
+- Hardened censored quantile regression against failed selection fits,
+  inconsistent censoring definitions, non-finite designs, and ambiguous
+  boundary solutions. The selected first-stage backend now falls back to
+  base-R GLM after nonconvergence or a boundary solution, records initial and
+  final backend diagnostics, and stops if the fallback is still invalid.
+- Made design reduction scale aware, aligned matrix, vector, CUDA, and
+  bounded-memory evaluation on a stable weighted type-7 quantile rule, and
+  added explicit distribution-regression noncrossing policies and diagnostics.
+  The direct type-7 implementation agrees with
+  `Hmisc::wtd.quantile(normwt = TRUE)` for ordinary weights when cumulative
+  weighted ranks are numerically distinct, while avoiding `approx()` tie
+  collapse for extreme weight ranges.
+- Preserved the 1.0 numerical default `legacy_qr_shift = TRUE`; setting it to
+  `FALSE` removes the legacy scalar prediction shift. The shift cancels from
+  decomposition effects but changes fitted-distribution levels and diagnostics.
+- Exposed the 1.0 running-maximum DR rule as the explicit, backward-compatible
+  default `dr_noncrossing = "cummax"`. New opt-in alternatives are increasing
+  `"rearrange"` and equal-weight `"isotonic"`; `"none"` disables monotonicity
+  correction but still enforces `[0, 1]` probability bounds.
+  Diagnostics now distinguish raw and corrected crossings from the count and
+  maximum size of probability-bound corrections.
+- Advanced the output schema to version 1.1 for the additive DR CDF,
+  CQR-selection, and GPU-runtime diagnostics; archived 1.0 contracts remain
+  available as prior-release records. The 1.1 S3 inventory also records the
+  existing simulation-validation print method omitted from the initial 1.0
+  machine-readable inventory.
+- Reduced CPU distribution-regression marginalization memory use and improved
+  benchmark, simulation, plotting, worker, and all-failed-run diagnostics.
+- Strengthened optional CUDA capability checks, module identity, precision
+  handling, command-line controls, provenance, and continuous-integration
+  isolation.
+- Preserved full midpoint conditional grids for CQR, location, and
+  location-scale models while limiting tail trimming to QR, and fixed the
+  intercept-only LPM matrix shape.
+- Added scale-aware complete and quasi-complete separation diagnostics shared
+  by CPU and CUDA binary fits, and preserved the process dimension for a
+  single regular CUDA threshold.
+- Recorded requested and effective point, threshold, and simulation worker
+  counts; point fitting is capped at the two available group models and nested
+  process parallelism remains disallowed.
+- Made decomposition, simulation, benchmark, and scaling output sets
+  transactional; added early CLI path-collision guards and structural
+  validation for bootstrap, simulation, and scaling checkpoints.
+- Made resumed scaling schedules reproduce uninterrupted repetition order,
+  retained missing RSS as `NA`, and added runtime fingerprints to scaling and
+  simulation identities.
+- Corrected the stable type-7 bootstrap rank normalization so integer-frequency
+  compressed empirical and counterfactual resamples match explicit row
+  duplication, including fitted residual distributions, CQR selection cutoffs,
+  effective sample-size gates, matrix/chunked marginalization, and CUDA
+  marginal quantiles. `fit_weighted_qr()` now exposes the same optional
+  positive-integer row-frequency representation without changing its 1.0
+  ordered argument prefix.
+
 # scalableCounterfactual 1.0.0
 
 - Froze the public API and output schema at version 1.0.

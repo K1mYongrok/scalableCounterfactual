@@ -2,6 +2,9 @@ isolated_qr_benchmark_task <- function(task_path, result_path) {
   task <- readRDS(task_path)
   restore_registry_snapshot(task$registry_snapshot)
   result <- tryCatch({
+    validate_execution_parallelism(
+      "qr", task$solver, task$control, task$point_workers
+    )
     measured <- measure_resources(function() {
       estimate_point_prepared(
         task$prepared,
@@ -134,6 +137,14 @@ run_isolated_qr_process <- function(
 }
 
 summarize_scaling_benchmark <- function(raw, reference_solver) {
+  finite_median <- function(values) {
+    values <- values[is.finite(values)]
+    if (length(values)) stats::median(values) else NA_real_
+  }
+  finite_max <- function(values) {
+    values <- values[is.finite(values)]
+    if (length(values)) max(values) else NA_real_
+  }
   keys <- unique(raw[c("sample_n", "solver")])
   rows <- lapply(seq_len(nrow(keys)), function(i) {
     selected <- raw$sample_n == keys$sample_n[[i]] &
@@ -149,17 +160,9 @@ summarize_scaling_benchmark <- function(raw, reference_solver) {
       median_process_seconds = if (nrow(ok)) {
         stats::median(ok$process_elapsed_seconds)
       } else NA_real_,
-      median_peak_process_rss_mb = if (nrow(ok)) {
-        stats::median(ok$peak_process_rss_mb, na.rm = TRUE)
-      } else NA_real_,
-      max_peak_process_rss_mb = if (nrow(ok)) {
-        max(ok$peak_process_rss_mb, na.rm = TRUE)
-      } else NA_real_,
-      max_observed_process_rss_mb = if (any(is.finite(
-        all_rows$peak_process_rss_mb
-      ))) {
-        max(all_rows$peak_process_rss_mb, na.rm = TRUE)
-      } else NA_real_,
+      median_peak_process_rss_mb = finite_median(ok$peak_process_rss_mb),
+      max_peak_process_rss_mb = finite_max(ok$peak_process_rss_mb),
+      max_observed_process_rss_mb = finite_max(all_rows$peak_process_rss_mb),
       max_abs_effect_difference = if (nrow(ok) &&
           any(is.finite(ok$max_abs_effect_difference))) {
         max(ok$max_abs_effect_difference, na.rm = TRUE)
@@ -201,6 +204,94 @@ summarize_scaling_benchmark <- function(raw, reference_solver) {
   summary <- summary[order(summary$sample_n, summary$median_seconds), , drop = FALSE]
   rownames(summary) <- NULL
   summary
+}
+
+valid_scaling_checkpoint <- function(
+    checkpoint, signature, sample_sizes, solvers, repetitions,
+    reported_quantiles, conditional_quantiles, design_columns,
+    point_workers_requested, point_workers) {
+  tryCatch({
+  if (!is.list(checkpoint) || !identical(checkpoint$signature, signature) ||
+      !is.list(checkpoint$rows) || !is.list(checkpoint$fits)) {
+    return(FALSE)
+  }
+  fit_keys <- names(checkpoint$fits)
+  if (is.null(fit_keys)) fit_keys <- character()
+  if (any(!nzchar(fit_keys)) || anyDuplicated(fit_keys)) return(FALSE)
+  if (!length(checkpoint$rows) && !length(checkpoint$fits)) return(TRUE)
+  if (length(checkpoint$rows) != length(checkpoint$fits)) return(FALSE)
+  required_row_fields <- c(
+    "sample_n", "solver", "repetition", "run_order", "status",
+    "elapsed_seconds", "process_elapsed_seconds", "peak_r_heap_mb",
+    "peak_process_rss_mb", "point_workers_requested", "point_workers"
+  )
+  scalar_number <- function(value, finite = TRUE, minimum = -Inf) {
+    valid <- is.numeric(value) && length(value) == 1L && !is.na(value)
+    if (finite) valid <- valid && is.finite(value)
+    valid && value >= minimum
+  }
+  missing_or_nonnegative <- function(value) {
+    is.numeric(value) && length(value) == 1L &&
+      (is.na(value) || (is.finite(value) && value >= 0))
+  }
+  integer_scalar <- function(value, minimum = 1L) {
+    scalar_number(value, minimum = minimum) && value == floor(value)
+  }
+  row_keys <- vapply(checkpoint$rows, function(row) {
+    if (!is.data.frame(row) || nrow(row) != 1L ||
+        !all(required_row_fields %in% names(row)) ||
+        !is.numeric(row$sample_n) || !is.numeric(row$repetition) ||
+        !is.character(row$solver) || !is.character(row$status) ||
+        length(row$sample_n) != 1L || length(row$repetition) != 1L ||
+        length(row$solver) != 1L || length(row$status) != 1L ||
+        !row$sample_n %in% sample_sizes || !row$solver %in% solvers ||
+        !row$repetition %in% seq_len(repetitions) ||
+        !row$status %in% c("ok", "error", "timeout") ||
+        !integer_scalar(row$sample_n) ||
+        !integer_scalar(row$repetition) ||
+        !integer_scalar(row$run_order) || row$run_order > length(solvers) ||
+        !integer_scalar(row$point_workers_requested) ||
+        row$point_workers_requested != point_workers_requested ||
+        !integer_scalar(row$point_workers) ||
+        row$point_workers != point_workers ||
+        !missing_or_nonnegative(row$peak_process_rss_mb) ||
+        !scalar_number(row$process_elapsed_seconds, minimum = 0) ||
+        (row$status == "ok" && (
+          !scalar_number(row$elapsed_seconds, minimum = 0) ||
+          !scalar_number(row$peak_r_heap_mb, minimum = 0)
+        ))) {
+      return(NA_character_)
+    }
+    paste(row$sample_n, row$repetition, row$solver, sep = "::")
+  }, character(1L))
+  if (anyNA(row_keys) || anyDuplicated(row_keys) ||
+      !setequal(row_keys, fit_keys)) return(FALSE)
+  all(vapply(fit_keys, function(key) {
+    fit <- checkpoint$fits[[key]]
+    row <- checkpoint$rows[[match(key, row_keys)]]
+    if (!is.list(fit) || !is.character(fit$status) ||
+        length(fit$status) != 1L || !identical(fit$status, row$status)) {
+      return(FALSE)
+    }
+    if (fit$status != "ok") {
+      return(is.character(fit$error) && length(fit$error) == 1L &&
+        !is.na(fit$error) && nzchar(fit$error))
+    }
+    is.matrix(fit$effects) && is.numeric(fit$effects) &&
+      identical(dim(fit$effects), c(3L, length(reported_quantiles))) &&
+      all(is.finite(fit$effects)) &&
+      is.matrix(fit$group0_coefficients) &&
+      is.numeric(fit$group0_coefficients) &&
+      identical(dim(fit$group0_coefficients), c(
+        as.integer(design_columns), length(conditional_quantiles)
+      )) && all(is.finite(fit$group0_coefficients)) &&
+      is.matrix(fit$group1_coefficients) &&
+      is.numeric(fit$group1_coefficients) &&
+      identical(dim(fit$group1_coefficients), c(
+        as.integer(design_columns), length(conditional_quantiles)
+      )) && all(is.finite(fit$group1_coefficients))
+  }, logical(1L)))
+  }, error = function(error) FALSE)
 }
 
 #' Isolated-process QR scaling benchmark
@@ -255,7 +346,15 @@ benchmark_qr_scaling <- function(
   )))
   repetitions <- assert_scalar_integer(repetitions, "repetitions", 1L)
   warmup <- assert_scalar_integer(warmup, "warmup", 0L)
-  point_workers <- assert_scalar_integer(point_workers, "point_workers", 1L)
+  point_workers_requested <- assert_scalar_integer(
+    point_workers, "point_workers", 1L
+  )
+  point_workers <- min(point_workers_requested, 2L)
+  for (solver in solvers) {
+    validate_execution_parallelism(
+      "qr", solver, control, point_workers_requested
+    )
+  }
   rss_poll_interval_ms <- assert_scalar_integer(
     rss_poll_interval_ms, "rss_poll_interval_ms", 1L
   )
@@ -269,7 +368,7 @@ benchmark_qr_scaling <- function(
     stop("sample_sizes cannot exceed the prepared analysis sample", call. = FALSE)
   }
   checkpoint_signature <- object_md5(list(
-    schema_version = 1L,
+    schema_version = 3L,
     package_version = as.character(
       utils::packageVersion("scalableCounterfactual")
     ),
@@ -284,18 +383,37 @@ benchmark_qr_scaling <- function(
     control = control,
     sample_sizes = sample_sizes,
     seed = seed,
+    point_workers_requested = point_workers_requested,
     point_workers = point_workers,
     repetitions = repetitions,
+    warmup = warmup,
     randomize_order = randomize_order,
     rss_poll_interval_ms = rss_poll_interval_ms,
-    timeout_seconds = timeout_seconds
+    timeout_seconds = timeout_seconds,
+    runtime = stats::setNames(lapply(sort(solvers), function(solver) {
+      bootstrap_runtime_identity("qr", solver, control)
+    }), sort(solvers))
   ))
   checkpoint <- NULL
   if (!is.null(checkpoint_path) && isTRUE(resume) && file.exists(checkpoint_path)) {
-    checkpoint <- readRDS(checkpoint_path)
-    if (!identical(checkpoint$signature, checkpoint_signature)) {
+    checkpoint <- tryCatch(readRDS(checkpoint_path), error = function(error) NULL)
+    if (is.null(checkpoint)) {
+      warning("scaling benchmark checkpoint is unreadable; recomputing it",
+              call. = FALSE)
+    }
+    if (!is.null(checkpoint) &&
+        !identical(checkpoint$signature, checkpoint_signature)) {
       stop("scaling benchmark checkpoint is incompatible with this run",
            call. = FALSE)
+    }
+    if (!is.null(checkpoint) && !valid_scaling_checkpoint(
+      checkpoint, checkpoint_signature, sample_sizes, solvers, repetitions,
+      control$reported_quantiles, control$conditional_quantiles,
+      ncol(prepared_full$X0), point_workers_requested, point_workers
+    )) {
+      warning("scaling benchmark checkpoint is malformed; recomputing it",
+              call. = FALSE)
+      checkpoint <- NULL
     }
   }
   rows <- checkpoint$rows %||% list()
@@ -317,17 +435,35 @@ benchmark_qr_scaling <- function(
     } else {
       subsample_prepared_data(prepared_full, sample_n, seed + sample_n)
     }
-    effective_warmup <- if (any(startsWith(
+    has_recorded_run <- any(startsWith(
       completed_keys, paste0(sample_n, "::")
-    ))) 0L else warmup
-    for (iteration in seq_len(effective_warmup + repetitions)) {
-      recorded <- iteration > effective_warmup
-      repetition <- iteration - effective_warmup
+    ))
+    if (!has_recorded_run && warmup > 0L) {
+      for (iteration in seq_len(warmup)) {
+        set.seed(seed + sample_n + iteration * 10000L)
+        order <- if (isTRUE(randomize_order)) sample(solvers) else solvers
+        for (solver in order) {
+          run_id <- run_id + 1L
+          solver_seed <- seed + sample_n +
+            match(solver, supported_qr_solvers()) * 1000L
+          run_isolated_qr_process(
+            list(
+              prepared = prepared, solver = solver, control = control,
+              point_workers = point_workers, seed = solver_seed
+            ),
+            poll_interval_ms = rss_poll_interval_ms,
+            timeout_seconds = timeout_seconds
+          )
+        }
+      }
+    }
+    for (repetition in seq_len(repetitions)) {
+      iteration <- warmup + repetition
       set.seed(seed + sample_n + iteration * 10000L)
       order <- if (isTRUE(randomize_order)) sample(solvers) else solvers
       for (solver in order) {
         key <- paste(sample_n, repetition, solver, sep = "::")
-        if (recorded && key %in% completed_keys) next
+        if (key %in% completed_keys) next
         run_id <- run_id + 1L
         solver_seed <- seed + sample_n +
           match(solver, supported_qr_solvers()) * 1000L
@@ -339,7 +475,6 @@ benchmark_qr_scaling <- function(
           poll_interval_ms = rss_poll_interval_ms,
           timeout_seconds = timeout_seconds
         )
-        if (!recorded) next
         fits[[key]] <- result
         rows[[length(rows) + 1L]] <- data.frame(
           sample_n = sample_n,
@@ -352,6 +487,7 @@ benchmark_qr_scaling <- function(
           peak_r_heap_mb = result$peak_r_heap_mb %||% NA_real_,
           peak_process_rss_mb = result$peak_process_rss_mb %||% NA_real_,
           rss_poll_interval_ms = rss_poll_interval_ms,
+          point_workers_requested = point_workers_requested,
           point_workers = point_workers,
           error = result$error %||% NA_character_,
           warning_count = result$warning_count %||% NA_integer_,

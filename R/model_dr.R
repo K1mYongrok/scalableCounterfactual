@@ -57,8 +57,10 @@ fit_binary_threshold <- function(
     probability <- if (response[[1L]] == 1) 1 - 1e-8 else 1e-8
     link_value <- family$linkfun(probability)
     if (is.null(constant_direction)) {
-      coefficients <- rep(0, ncol(X))
-      coefficients[[1L]] <- link_value
+      stop(
+        "a constant binary response requires an identified intercept direction",
+        call. = FALSE
+      )
     } else {
       coefficients <- as.numeric(constant_direction) * link_value
     }
@@ -177,10 +179,11 @@ fit_binary_threshold <- function(
 
   fit <- fitted$value
   coefficients <- as.numeric(fit$coefficients)
+  linear_predictor <- drop(X %*% coefficients)
   probabilities <- if (!is.null(fit$fitted.values)) {
     as.numeric(fit$fitted.values)
   } else {
-    as.numeric(family$linkinv(drop(X %*% coefficients)))
+    as.numeric(family$linkinv(linear_predictor))
   }
   if (length(probabilities) != nrow(X) || any(!is.finite(probabilities)) ||
       any(probabilities < 0 | probabilities > 1)) {
@@ -194,9 +197,17 @@ fit_binary_threshold <- function(
   } else {
     isTRUE(fit$converged)
   }
-  boundary <- isTRUE(fit$boundary) ||
-    any(probabilities <= 1e-8 | probabilities >= 1 - 1e-8) ||
-    any(abs(coefficients) > 100)
+  # Raw coefficient magnitudes and isolated extreme fitted probabilities are
+  # not separation diagnostics.  Complete and quasi-complete separation do
+  # imply that every fitted signed margin is nonnegative, with at least one
+  # strictly positive margin.  A scale-aware tolerance keeps this test stable
+  # under harmless covariate rescaling and floating-point roundoff.
+  signed_margin <- (2 * response - 1) * linear_predictor
+  margin_tolerance <- max(tolerance, 64 * .Machine$double.eps) *
+    max(1, max(abs(linear_predictor)))
+  separated <- all(signed_margin >= -margin_tolerance) &&
+    any(signed_margin > margin_tolerance)
+  boundary <- isTRUE(fit$boundary) || separated
   list(
     coefficients = coefficients,
     converged = converged,
@@ -348,7 +359,13 @@ fit_distribution_regression <- function(
     transform <- preconditioned$transform
     fit_X <- X %*% transform
     intercept_index <- match("(Intercept)", colnames(X))
-    if (is.na(intercept_index)) intercept_index <- 1L
+    if (is.na(intercept_index)) {
+      stop(
+        model, " distribution regression requires an intercept because its ",
+        "threshold grid includes a constant-response endpoint",
+        call. = FALSE
+      )
+    }
     constant_original <- numeric(ncol(X))
     constant_original[[intercept_index]] <- 1
     constant_direction <- as.numeric(solve(transform, constant_original))
@@ -437,6 +454,9 @@ fit_distribution_regression <- function(
   }
 
   coefficients <- vapply(fits, `[[`, numeric(ncol(X)), "coefficients")
+  coefficients <- matrix(
+    as.numeric(coefficients), nrow = ncol(X), ncol = length(fits)
+  )
   if (model != "lpm") coefficients <- transform %*% coefficients
   if (anyNA(coefficients) || any(!is.finite(coefficients))) {
     stop(model, " distribution regression returned invalid coefficients",

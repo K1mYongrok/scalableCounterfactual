@@ -12,7 +12,7 @@ validate_model_solver <- function(model, solver) {
   } else {
     internal_na <- length(solver) == 1L && is.na(solver)
     if (!is.null(solver) && !internal_na) {
-      stop("solver is only valid when model = 'qr'", call. = FALSE)
+      stop("solver is only valid when model is 'qr' or 'cqr'", call. = FALSE)
     }
     solver <- NA_character_
   }
@@ -74,6 +74,48 @@ execution_backend_plan <- function(model, solver, control) {
   )
 }
 
+validate_execution_parallelism <- function(
+    model, solver, control, point_workers,
+    bootstrap_reps = 0L, bootstrap_workers = 1L) {
+  point_workers_effective <- min(point_workers, 2L)
+  backend_plan <- execution_backend_plan(model, solver, control)
+  bootstrap_workers_effective <- if (bootstrap_reps > 0L) {
+    min(bootstrap_workers, bootstrap_reps)
+  } else {
+    0L
+  }
+  if (backend_plan$fit_device == "cuda" && point_workers > 1L) {
+    stop(
+      "CUDA conditional fitting requires point_workers=1; use GPU column ",
+      "batching instead of multiple CUDA fitting processes",
+      call. = FALSE
+    )
+  }
+  if (backend_plan$any_cuda && bootstrap_reps > 0L &&
+      bootstrap_workers_effective > 1L) {
+    stop(
+      "CUDA bootstrap currently requires bootstrap_workers=1 to avoid ",
+      "multiple R processes oversubscribing one device",
+      call. = FALSE
+    )
+  }
+  uses_threshold_workers <- model %in% c("logit", "probit", "cloglog") &&
+    control$dr_workers > 1L
+  if (uses_threshold_workers &&
+      (point_workers > 1L || bootstrap_workers_effective > 1L)) {
+    stop(
+      "dr_workers > 1 cannot be combined with point_workers > 1 or ",
+      "bootstrap_workers > 1; choose one parallel execution layer",
+      call. = FALSE
+    )
+  }
+  list(
+    backend_plan = backend_plan,
+    point_workers_effective = point_workers_effective,
+    bootstrap_workers_effective = bootstrap_workers_effective
+  )
+}
+
 fit_backend_name <- function(fit) {
   fit$solver %||% fit$backend %||% "unknown"
 }
@@ -98,11 +140,15 @@ fit_two_group_models <- function(
   tasks <- list(
     list(
       X = prepared$X0, y = prepared$y0, weights = prepared$w0,
+      quantile_frequency = prepared$quantile_frequency0 %||%
+        rep(1, nrow(prepared$X0)),
       censoring = prepared$censoring0, event = prepared$event0,
       model = model, solver = solver, control = control
     ),
     list(
       X = prepared$X1, y = prepared$y1, weights = prepared$w1,
+      quantile_frequency = prepared$quantile_frequency1 %||%
+        rep(1, nrow(prepared$X1)),
       censoring = prepared$censoring1, event = prepared$event1,
       model = model, solver = solver, control = control
     )
@@ -125,6 +171,12 @@ fit_two_group_models <- function(
 
 evaluate_decomposition <- function(prepared, fit0, fit1, control) {
   marginal_resource <- measure_resources(function() {
+    normalization_n0 <- sum(
+      prepared$quantile_frequency0 %||% rep(1, nrow(prepared$X0))
+    )
+    normalization_n1 <- sum(
+      prepared$quantile_frequency1 %||% rep(1, nrow(prepared$X1))
+    )
     marginal_w0 <- if (isTRUE(control$legacy_weighted_quantile)) {
       prepared$w0 / prepared$n
     } else {
@@ -137,15 +189,18 @@ evaluate_decomposition <- function(prepared, fit0, fit1, control) {
     }
     fitted0 <- marginal_quantiles(
       fit0, prepared$X0, marginal_w0,
-      control$reported_quantiles, control
+      control$reported_quantiles, control,
+      normalization_rows = normalization_n0
     )
     counterfactual01 <- marginal_quantiles(
       fit0, prepared$X1, marginal_w1,
-      control$reported_quantiles, control
+      control$reported_quantiles, control,
+      normalization_rows = normalization_n1
     )
     fitted1 <- marginal_quantiles(
       fit1, prepared$X1, marginal_w1,
-      control$reported_quantiles, control
+      control$reported_quantiles, control,
+      normalization_rows = normalization_n1
     )
     marginal_diagnostics <- do.call(rbind, Map(
       function(distribution, values) {
@@ -159,6 +214,18 @@ evaluate_decomposition <- function(prepared, fit0, fit1, control) {
           estimated_matrix_mb = diagnostics$estimated_matrix_mb,
           boundary_quantiles = diagnostics$boundary_quantiles %||% 0L,
           identified_cdf_max = diagnostics$identified_cdf_max %||% NA_real_,
+          dr_noncrossing = diagnostics$dr_noncrossing %||% NA_character_,
+          dr_raw_crossing_pairs =
+            diagnostics$dr_raw_crossing_pairs %||% NA_integer_,
+          dr_raw_max_crossing =
+            diagnostics$dr_raw_max_crossing %||% NA_real_,
+          dr_out_of_bounds_values =
+            diagnostics$dr_out_of_bounds_values %||% NA_integer_,
+          dr_max_bound_adjustment =
+            diagnostics$dr_max_bound_adjustment %||% NA_real_,
+          dr_corrected_crossing_pairs =
+            diagnostics$dr_corrected_crossing_pairs %||% NA_integer_,
+          dr_max_adjustment = diagnostics$dr_max_adjustment %||% NA_real_,
           stringsAsFactors = FALSE
         )
       },
@@ -181,11 +248,13 @@ evaluate_decomposition <- function(prepared, fit0, fit1, control) {
     } else {
       observed0 <- weighted_quantile(
         prepared$y0, marginal_w0, control$reported_quantiles,
-        legacy = control$legacy_weighted_quantile
+        legacy = control$legacy_weighted_quantile,
+        normalization_n = normalization_n0
       )
       observed1 <- weighted_quantile(
         prepared$y1, marginal_w1, control$reported_quantiles,
-        legacy = control$legacy_weighted_quantile
+        legacy = control$legacy_weighted_quantile,
+        normalization_n = normalization_n1
       )
     }
     structure_effect <- fitted1 - counterfactual01
@@ -281,7 +350,9 @@ estimate_point_prepared <- function(
 
 #' Estimate a counterfactual quantile decomposition
 #'
-#' @param formula Outcome and covariate formula.
+#' @param formula Outcome and covariate formula. The formula must include an
+#'   intercept. Intercept-only formulas are supported for all models except
+#'   Cox regression, which also requires at least one covariate.
 #' @param data Data frame containing analysis variables.
 #' @param group Binary group column name or vector. Zero is the reference group
 #'   and one is the comparison group.
@@ -289,8 +360,9 @@ estimate_point_prepared <- function(
 #' @param model Conditional-distribution model: `qr`, `cqr`, `loc`, `locsca`,
 #'   `cox`, `logit`, `probit`, `cloglog`, or `lpm`.
 #' @param solver QR solver: `br`, `fn`, `pfn`, `qfnb`, `pfnb`, `proqreg`,
-#'   `profn`, `onestep`, or `auto`. CQR accepts the exact solvers `br`, `fn`,
-#'   `pfn`, `qfnb`, `pfnb`, and `auto`. Leave `NULL` for other models.
+#'   `profn`, `onestep`, experimental `cuda_admm`, or `auto`. CQR accepts the
+#'   exact solvers `br`, `fn`, `pfn`, `qfnb`, `pfnb`, and `auto`. Leave `NULL`
+#'   for other models.
 #' @param censoring Censoring-point column, vector, or scalar for `model =
 #'   "cqr"`.
 #' @param event Optional 0/1 event-status column or vector for `model = "cox"`.
@@ -371,35 +443,18 @@ counterfactual_decompose <- function(
     bootstrap_reps, "bootstrap_reps", 0L
   )
   point_workers <- assert_scalar_integer(point_workers, "point_workers", 1L)
+  point_workers_requested <- point_workers
   bootstrap_workers <- assert_scalar_integer(
     bootstrap_workers, "bootstrap_workers", 1L
   )
-  backend_plan <- execution_backend_plan(
-    model_solver$model, model_solver$solver, control
+  bootstrap_workers_requested <- bootstrap_workers
+  execution <- validate_execution_parallelism(
+    model_solver$model, model_solver$solver, control, point_workers,
+    bootstrap_reps, bootstrap_workers
   )
-  if (backend_plan$fit_device == "cuda" && point_workers > 1L) {
-    stop(
-      "CUDA conditional fitting requires point_workers=1; use GPU column ",
-      "batching instead of multiple CUDA fitting processes",
-      call. = FALSE
-    )
-  }
-  if (backend_plan$any_cuda && bootstrap_reps > 0L &&
-      bootstrap_workers > 1L) {
-    stop(
-      "CUDA bootstrap currently requires bootstrap_workers=1 to avoid ",
-      "multiple R processes oversubscribing one device",
-      call. = FALSE
-    )
-  }
-  if (control$dr_workers > 1L &&
-      (point_workers > 1L || (bootstrap_reps > 0L && bootstrap_workers > 1L))) {
-    stop(
-      "dr_workers > 1 cannot be combined with point_workers > 1 or ",
-      "bootstrap_workers > 1; choose one parallel execution layer",
-      call. = FALSE
-    )
-  }
+  backend_plan <- execution$backend_plan
+  point_workers <- execution$point_workers_effective
+  bootstrap_workers_effective <- execution$bootstrap_workers_effective
   seed <- assert_scalar_integer(seed, "seed", 1L)
   prepared <- prepare_cf_data(
     formula, data, group, weights,
@@ -460,7 +515,7 @@ counterfactual_decompose <- function(
       solver = model_solver$solver,
       control = control,
       reps = bootstrap_reps,
-      workers = bootstrap_workers,
+      workers = bootstrap_workers_effective,
       draw_point_workers = point_workers,
       checkpoint_dir = checkpoint_dir,
       seed = seed
@@ -500,6 +555,11 @@ counterfactual_decompose <- function(
     trimming = control$trimming,
     legacy_qr_shift = control$legacy_qr_shift,
     legacy_weighted_quantile = control$legacy_weighted_quantile,
+    weighted_quantile_rule = if (isTRUE(control$legacy_weighted_quantile)) {
+      "Hmisc_normwt_false_legacy"
+    } else {
+      "normalized_type7_direct_v1"
+    },
     qr_precondition = control$qr_precondition,
     marginal_method_requested = control$marginal_method,
     marginal_methods_resolved = paste(
@@ -512,10 +572,56 @@ counterfactual_decompose <- function(
     crossing_diagnostics = control$crossing_diagnostics,
     crossing_tolerance = control$crossing_tolerance,
     quantile_noncrossing = control$quantile_noncrossing,
+    dr_noncrossing = control$dr_noncrossing,
+    dr_raw_crossing_pairs_max = if (
+      any(is.finite(point$marginal_diagnostics$dr_raw_crossing_pairs))
+    ) max(
+      point$marginal_diagnostics$dr_raw_crossing_pairs,
+      na.rm = TRUE
+    ) else NA_integer_,
+    dr_max_noncrossing_adjustment = if (
+      any(is.finite(point$marginal_diagnostics$dr_max_adjustment))
+    ) max(point$marginal_diagnostics$dr_max_adjustment, na.rm = TRUE) else NA_real_,
     cqr_right = control$cqr_right,
     cqr_nsteps = control$cqr_nsteps,
     cqr_first_cut = control$cqr_first_cut,
     cqr_later_cut = control$cqr_later_cut,
+    cqr_selection_backend_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$backend
+    } else NA_character_,
+    cqr_selection_backend_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$backend
+    } else NA_character_,
+    cqr_selection_converged_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$converged
+    } else NA,
+    cqr_selection_converged_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$converged
+    } else NA,
+    cqr_selection_boundary_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$boundary
+    } else NA,
+    cqr_selection_boundary_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$boundary
+    } else NA,
+    cqr_selection_iterations_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$iterations
+    } else NA_integer_,
+    cqr_selection_iterations_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$iterations
+    } else NA_integer_,
+    cqr_selection_fallback_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$fallback_used
+    } else NA,
+    cqr_selection_fallback_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$fallback_used
+    } else NA,
+    cqr_selection_initial_backend_group0 = if (model_solver$model == "cqr") {
+      point$fits$group0$selection_diagnostics$initial_backend
+    } else NA_character_,
+    cqr_selection_initial_backend_group1 = if (model_solver$model == "cqr") {
+      point$fits$group1$selection_diagnostics$initial_backend
+    } else NA_character_,
     cox_boundary = control$cox_boundary,
     crossing_rows_max_share = if (nrow(point$crossing_diagnostics)) {
       max(point$crossing_diagnostics$crossing_row_share)
@@ -680,8 +786,10 @@ counterfactual_decompose <- function(
     } else {
       bootstrap$engine
     },
-    point_workers = min(point_workers, 2L),
-    bootstrap_workers = bootstrap_workers,
+    point_workers_requested = point_workers_requested,
+    point_workers = point_workers,
+    bootstrap_workers_requested = bootstrap_workers_requested,
+    bootstrap_workers = bootstrap_workers_effective,
     bootstrap_point_workers = if (is.null(bootstrap)) {
       NA_integer_
     } else {
@@ -743,6 +851,9 @@ counterfactual_decompose <- function(
       collapse = ","
     )
   )
+  if (isTRUE(backend_plan$any_cuda)) {
+    metadata <- c(metadata, gpu_run_metadata_fields(control))
+  }
   object <- structure(list(
     call = match.call(),
     metadata = metadata,
@@ -751,9 +862,21 @@ counterfactual_decompose <- function(
     bootstrap = bootstrap,
     results = inference
   ), class = "cfdecomp")
-  object$functional_tests <- if (bootstrap_reps > 1L) {
+  functional_quantiles <- point$quantiles[
+    point$quantiles >= 0.1 & point$quantiles <= 0.9
+  ]
+  can_run_functional_tests <- bootstrap_reps > 1L &&
+    length(functional_quantiles) >= 2L
+  object$functional_tests <- if (can_run_functional_tests) {
     functional_effect_tests(object)
   } else {
+    if (bootstrap_reps > 1L) {
+      warning(
+        "Automatic functional tests were skipped because fewer than two ",
+        "reported quantiles lie in [0.1, 0.9]",
+        call. = FALSE
+      )
+    }
     data.frame()
   }
   object

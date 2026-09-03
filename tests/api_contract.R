@@ -17,7 +17,8 @@ stopifnot(
   is.function(getS3method("summary", "cfdecomp")),
   is.function(getS3method("plot", "cfdecomp")),
   is.function(getS3method("print", "cfdecomp")),
-  is.function(getS3method("as.data.frame", "cfdecomp"))
+  is.function(getS3method("as.data.frame", "cfdecomp")),
+  is.function(getS3method("print", "cf_simulation_validation"))
 )
 
 s3_contract <- list(
@@ -28,11 +29,15 @@ s3_contract <- list(
     "x", "effects", "interval", "col", "lwd", "pch", "xlab", "ylab",
     "main", "..."
   ),
-  "print.summary.cfdecomp" = c("x", "...")
+  "print.summary.cfdecomp" = c("x", "..."),
+  "print.cf_simulation_validation" = c("x", "...")
 )
-s3_generics <- c("print", "as.data.frame", "summary", "plot", "print")
+s3_generics <- c(
+  "print", "as.data.frame", "summary", "plot", "print", "print"
+)
 s3_classes <- c(
-  "cfdecomp", "cfdecomp", "cfdecomp", "cfdecomp", "summary.cfdecomp"
+  "cfdecomp", "cfdecomp", "cfdecomp", "cfdecomp", "summary.cfdecomp",
+  "cf_simulation_validation"
 )
 for (method_index in seq_along(s3_contract)) {
   actual_arguments <- names(formals(getS3method(
@@ -75,7 +80,8 @@ api_contract <- list(
     "dr_warm_start", "dr_maxit", "dr_tolerance", "dr_precondition",
     "gpu_backend", "gpu_precision", "gpu_python", "gpu_python_path",
     "gpu_module_path", "gpu_block_columns", "gpu_qr_rho",
-    "gpu_qr_maxit", "gpu_qr_tolerance", "gpu_qr_allow_nonconvergence"
+    "gpu_qr_maxit", "gpu_qr_tolerance", "gpu_qr_allow_nonconvergence",
+    "dr_noncrossing"
   ),
   conditional_backend_registry = character(),
   counterfactual_decompose = c(
@@ -85,7 +91,7 @@ api_contract <- list(
   ),
   fit_weighted_qr = c(
     "X", "y", "weights", "taus", "solver", "precondition",
-    "onestep_first_solver", "onestep_bandwidth", "gpu_control"
+    "onestep_first_solver", "onestep_bandwidth", "gpu_control", "frequency"
   ),
   functional_effect_tests = c("object", "constants", "quantile_range"),
   gpu_backend_status = c("python", "python_path", "module_path"),
@@ -124,7 +130,7 @@ split_contract_arguments <- function(value) {
 schema_dir <- system.file("schema", package = "scalableCounterfactual")
 stopifnot(nzchar(schema_dir))
 public_schema <- data.table::fread(
-  file.path(schema_dir, "public_api_1.0.csv"), na.strings = ""
+  file.path(schema_dir, "public_api_1.1.csv"), na.strings = ""
 )
 stopifnot(identical(public_schema[["function"]], names(api_contract)))
 for (row in seq_len(nrow(public_schema))) {
@@ -133,14 +139,53 @@ for (row in seq_len(nrow(public_schema))) {
     api_contract[[public_schema[["function"]][[row]]]]
   ))
 }
+public_schema_1_0 <- data.table::fread(
+  file.path(schema_dir, "public_api_1.0.csv"), na.strings = ""
+)
+stopifnot(identical(public_schema_1_0[["function"]], names(api_contract)))
+for (row in seq_len(nrow(public_schema_1_0))) {
+  function_name <- public_schema_1_0[["function"]][[row]]
+  prior_arguments <- split_contract_arguments(
+    public_schema_1_0$ordered_arguments[[row]]
+  )
+  stopifnot(identical(
+    head(api_contract[[function_name]], length(prior_arguments)),
+    prior_arguments
+  ))
+}
 
-s3_schema <- data.table::fread(file.path(schema_dir, "s3_methods_1.0.csv"))
+# Minor releases preserve the 1.0 numerical defaults. New DR correction
+# policies are additive opt-ins rather than silent changes to existing fits.
+default_control <- cf_control()
+stopifnot(
+  identical(default_control$legacy_qr_shift, TRUE),
+  identical(default_control$dr_noncrossing, "cummax"),
+  "rearrange" %in% eval(formals(cf_control)$dr_noncrossing)
+)
+
+s3_schema <- data.table::fread(file.path(schema_dir, "s3_methods_1.1.csv"))
 schema_method_names <- paste(s3_schema$generic, s3_schema$class, sep = ".")
 stopifnot(identical(schema_method_names, names(s3_contract)))
 for (row in seq_len(nrow(s3_schema))) {
   stopifnot(identical(
     split_contract_arguments(s3_schema$ordered_arguments[[row]]),
     s3_contract[[schema_method_names[[row]]]]
+  ))
+}
+s3_schema_1_0 <- data.table::fread(
+  file.path(schema_dir, "s3_methods_1.0.csv")
+)
+s3_method_names_1_0 <- paste(
+  s3_schema_1_0$generic, s3_schema_1_0$class, sep = "."
+)
+stopifnot(identical(
+  s3_method_names_1_0,
+  head(names(s3_contract), length(s3_method_names_1_0))
+))
+for (row in seq_len(nrow(s3_schema_1_0))) {
+  stopifnot(identical(
+    split_contract_arguments(s3_schema_1_0$ordered_arguments[[row]]),
+    s3_contract[[s3_method_names_1_0[[row]]]]
   ))
 }
 
@@ -169,7 +214,7 @@ fit <- counterfactual_decompose(
 )
 stopifnot(
   inherits(fit, "cfdecomp"),
-  identical(fit$metadata$output_schema_version, "1.0")
+  identical(fit$metadata$output_schema_version, "1.1")
 )
 
 output_dir <- tempfile("cf_api_contract_")
@@ -179,7 +224,7 @@ required_files <- c(
   "point_resources.csv", "marginalization_diagnostics.csv",
   "run_metadata.csv", "fit.rds"
 )
-file_schema <- data.table::fread(file.path(schema_dir, "output_files_1.0.csv"))
+file_schema <- data.table::fread(file.path(schema_dir, "output_files_1.1.csv"))
 stopifnot(identical(
   sort(file_schema[requirement == "required", file]),
   sort(required_files)
@@ -196,7 +241,7 @@ required_columns <- c(
   "uniform_upper", "bootstrap_reps", "bootstrap_reps_effective", "alpha"
 )
 decomposition_schema <- data.table::fread(
-  file.path(schema_dir, "decomposition_1.0.csv")
+  file.path(schema_dir, "decomposition_1.1.csv")
 )
 stopifnot(
   identical(decomposition_schema$position, seq_along(required_columns)),
@@ -215,7 +260,20 @@ stopifnot(
 )
 metadata <- data.table::fread(file.path(output_dir, "run_metadata.csv"))
 stopifnot(
-  metadata[item == "output_schema_version", value][[1L]] == "1.0",
+  metadata[item == "output_schema_version", value][[1L]] == "1.1",
   inherits(readRDS(file.path(output_dir, "fit.rds")), "cfdecomp")
+)
+marginalization_schema <- data.table::fread(
+  file.path(schema_dir, "marginalization_1.1.csv")
+)
+marginalization <- data.table::fread(
+  file.path(output_dir, "marginalization_diagnostics.csv")
+)
+stopifnot(
+  identical(
+    marginalization_schema$position,
+    seq_len(nrow(marginalization_schema))
+  ),
+  identical(marginalization_schema$column, names(marginalization))
 )
 unlink(output_dir, recursive = TRUE)

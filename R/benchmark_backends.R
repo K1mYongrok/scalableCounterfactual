@@ -43,11 +43,19 @@ benchmark_conditional_backends <- function(
   if (!reference_backend %in% backends) {
     stop("reference_backend must be included in backends", call. = FALSE)
   }
-  point_workers <- assert_scalar_integer(point_workers, "point_workers", 1L)
-  if (control$dr_workers > 1L && point_workers > 1L) {
-    stop(
-      "dr_workers > 1 cannot be combined with point_workers > 1",
-      call. = FALSE
+  point_workers_requested <- assert_scalar_integer(
+    point_workers, "point_workers", 1L
+  )
+  point_workers <- min(point_workers_requested, 2L)
+  for (backend in backends) {
+    backend_control <- control
+    if (linear_model) {
+      backend_control$linear_backend <- backend
+    } else {
+      backend_control$dr_backend <- backend
+    }
+    validate_execution_parallelism(
+      model, NA_character_, backend_control, point_workers_requested
     )
   }
   prepared <- prepare_cf_data(formula, data, group, weights)
@@ -80,6 +88,17 @@ benchmark_conditional_backends <- function(
       resolved <- vapply(
         measured$value$fits, function(fit) fit$backend, character(1L)
       )
+      grid_sizes <- vapply(measured$value$fits, function(fit) {
+        if (!is.null(fit$thresholds)) length(fit$thresholds) else
+          length(fit$taus)
+      }, integer(1L))
+      effective_threshold_workers <- if (linear_model) {
+        c(group0 = 1L, group1 = 1L)
+      } else {
+        vapply(
+          measured$value$fits, `[[`, integer(1L), "threshold_workers"
+        )
+      }
       data.frame(
         model = model,
         backend = backend,
@@ -88,13 +107,21 @@ benchmark_conditional_backends <- function(
         status = "ok",
         observations = prepared$n,
         design_columns = ncol(prepared$X0),
-        conditional_grid_size = if (model %in% c("loc", "locsca")) {
-          length(control$conditional_quantiles)
-        } else {
-          length(measured$value$fits$group0$thresholds)
-        },
+        conditional_grid_size = if (
+          identical(grid_sizes[[1L]], grid_sizes[[2L]])
+        ) grid_sizes[[1L]] else NA_integer_,
+        conditional_grid_size_group0 = grid_sizes[[1L]],
+        conditional_grid_size_group1 = grid_sizes[[2L]],
+        point_workers_requested = point_workers_requested,
         point_workers = point_workers,
-        threshold_workers = if (linear_model) 1L else control$dr_workers,
+        threshold_workers_requested = if (linear_model) 1L else
+          control$dr_workers,
+        threshold_workers = if (identical(
+          effective_threshold_workers[[1L]],
+          effective_threshold_workers[[2L]]
+        )) effective_threshold_workers[[1L]] else NA_integer_,
+        threshold_workers_group0 = effective_threshold_workers[[1L]],
+        threshold_workers_group1 = effective_threshold_workers[[2L]],
         elapsed_seconds = measured$value$elapsed_seconds,
         measured_wrapper_seconds = measured$elapsed_seconds,
         peak_r_heap_mb = max(
@@ -119,8 +146,15 @@ benchmark_conditional_backends <- function(
         observations = prepared$n,
         design_columns = ncol(prepared$X0),
         conditional_grid_size = NA_integer_,
+        conditional_grid_size_group0 = NA_integer_,
+        conditional_grid_size_group1 = NA_integer_,
+        point_workers_requested = point_workers_requested,
         point_workers = point_workers,
-        threshold_workers = if (linear_model) 1L else control$dr_workers,
+        threshold_workers_requested = if (linear_model) 1L else
+          control$dr_workers,
+        threshold_workers = NA_integer_,
+        threshold_workers_group0 = NA_integer_,
+        threshold_workers_group1 = NA_integer_,
         elapsed_seconds = NA_real_,
         measured_wrapper_seconds = NA_real_,
         peak_r_heap_mb = NA_real_,

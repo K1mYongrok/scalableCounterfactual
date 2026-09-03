@@ -23,27 +23,51 @@ point_effect_table <- function(point, reps, alpha) {
 
 effect_inference <- function(effect, estimate, draws, control, model, solver) {
   identified <- is.finite(estimate)
-  effective_reps <- colSums(is.finite(draws))
-  standard_error <- if (control$robust_se) {
-    apply(draws, 2L, function(x) {
-      diff(stats::quantile(x, c(0.25, 0.75), na.rm = TRUE)) / 1.34
-    })
-  } else {
-    apply(draws, 2L, stats::sd, na.rm = TRUE)
-  }
+  effective_reps <- as.integer(colSums(is.finite(draws)))
+  standard_error <- vapply(seq_len(ncol(draws)), function(index) {
+    values <- draws[is.finite(draws[, index]), index]
+    if (length(values) < 2L) return(NA_real_)
+    if (isTRUE(control$robust_se)) {
+      diff(stats::quantile(values, c(0.25, 0.75))) / 1.34
+    } else {
+      stats::sd(values)
+    }
+  }, numeric(1L))
   standard_error[!identified | effective_reps < 2L] <- NA_real_
   point_critical <- stats::qnorm(1 - control$alpha / 2)
-  safe_se <- ifelse(standard_error > 0, standard_error, NA_real_)
-  studentized <- abs(sweep(draws, 2L, estimate, "-") /
-    matrix(safe_se, nrow(draws), ncol(draws), byrow = TRUE))
-  usable <- identified & apply(studentized, 2L, function(x) all(is.finite(x)))
-  uniform_critical <- if (any(usable)) {
-    maximum_t <- apply(studentized[, usable, drop = FALSE], 1L, max)
-    as.numeric(stats::quantile(
-      maximum_t, 1 - control$alpha, names = FALSE, na.rm = TRUE
+  uniform_support <- rep(FALSE, length(estimate))
+  if (nrow(draws) >= 2L) {
+    uniform_support <- identified & is.finite(standard_error) &
+      effective_reps == nrow(draws)
+  }
+  positive_scale <- uniform_support & standard_error > 0
+  uniform_critical <- if (any(positive_scale)) {
+    studentized <- abs(sweep(
+      draws[, positive_scale, drop = FALSE],
+      2L,
+      estimate[positive_scale],
+      "-"
+    ) / matrix(
+      standard_error[positive_scale],
+      nrow(draws),
+      sum(positive_scale),
+      byrow = TRUE
     ))
+    maximum_t <- apply(studentized, 1L, max)
+    as.numeric(stats::quantile(
+      maximum_t, 1 - control$alpha, names = FALSE
+    ))
+  } else if (any(uniform_support)) {
+    0
   } else {
     NA_real_
+  }
+  uniform_lower <- uniform_upper <- rep(NA_real_, length(estimate))
+  if (is.finite(uniform_critical)) {
+    uniform_lower[uniform_support] <- estimate[uniform_support] -
+      uniform_critical * standard_error[uniform_support]
+    uniform_upper[uniform_support] <- estimate[uniform_support] +
+      uniform_critical * standard_error[uniform_support]
   }
   data.frame(
     model = model,
@@ -55,8 +79,8 @@ effect_inference <- function(effect, estimate, draws, control, model, solver) {
     std_error = standard_error,
     pointwise_lower = estimate - point_critical * standard_error,
     pointwise_upper = estimate + point_critical * standard_error,
-    uniform_lower = estimate - uniform_critical * standard_error,
-    uniform_upper = estimate + uniform_critical * standard_error,
+    uniform_lower = uniform_lower,
+    uniform_upper = uniform_upper,
     bootstrap_reps = nrow(draws),
     bootstrap_reps_effective = effective_reps,
     alpha = control$alpha,

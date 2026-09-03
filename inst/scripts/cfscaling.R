@@ -5,6 +5,13 @@ suppressPackageStartupMessages({
   library(scalableCounterfactual)
 })
 
+script_file <- sub(
+  "^--file=", "",
+  grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[[1L]]
+)
+source(file.path(dirname(normalizePath(script_file)), "_cli_common.R"))
+rm(script_file)
+
 usage <- function() {
   cat(paste(
     "Usage:",
@@ -63,6 +70,14 @@ timeout_seconds <- value(args, "timeout_seconds", Inf, as.numeric)
 checkpoint_path <- value(args, "checkpoint", NULL)
 resume <- value(args, "resume", TRUE, as_bool)
 output_path <- value(args, "output", "output/benchmark/qr_scaling.csv")
+summary_path <- sub("\\.csv$", "_summary.csv", output_path, ignore.case = TRUE)
+if (identical(summary_path, output_path)) summary_path <- paste0(output_path, "_summary.csv")
+assert_distinct_cli_paths(list(
+  input_data = data_path,
+  benchmark_output = output_path,
+  summary_output = summary_path,
+  checkpoint = checkpoint_path
+))
 
 if (!file.exists(data_path)) stop("data file not found: ", data_path, call. = FALSE)
 message("Reading ", data_path)
@@ -93,11 +108,17 @@ benchmark <- benchmark_qr_scaling(
   checkpoint_path = checkpoint_path,
   resume = resume
 )
-dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
-data.table::fwrite(benchmark$raw, output_path)
-summary_path <- sub("\\.csv$", "_summary.csv", output_path, ignore.case = TRUE)
-if (identical(summary_path, output_path)) summary_path <- paste0(output_path, "_summary.csv")
-data.table::fwrite(benchmark$summary, summary_path)
+scalableCounterfactual:::atomic_write_output_files(
+  dirname(output_path),
+  c(basename(output_path), basename(summary_path)),
+  required_files = c(basename(output_path), basename(summary_path)),
+  writer = function(stage) {
+    data.table::fwrite(benchmark$raw, file.path(stage, basename(output_path)))
+    data.table::fwrite(
+      benchmark$summary, file.path(stage, basename(summary_path))
+    )
+  }
+)
 print(benchmark$summary)
 message("Scaling benchmark written to ", normalizePath(output_path, winslash = "/"))
 message("Summary written to ", normalizePath(summary_path, winslash = "/"))

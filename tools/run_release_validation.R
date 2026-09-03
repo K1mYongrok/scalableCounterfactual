@@ -42,6 +42,13 @@ simulation <- simulate_counterfactual_validation(
   max_retries = 1L
 )
 write_simulation_validation(simulation, simulation_dir)
+if (simulation$resources$failed_tasks[[1L]] > 0L) {
+  stop(
+    "release simulation validation had ",
+    simulation$resources$failed_tasks[[1L]], " failed task(s)",
+    call. = FALSE
+  )
+}
 
 set.seed(20260810L)
 n <- if (quick) 1000L else 5000L
@@ -62,7 +69,7 @@ benchmark <- benchmark_qr_solvers_repeated(
   solvers = c("br", "fn", "qfnb", "pfnb", "onestep"),
   reference_solver = "br",
   control = cf_control(
-    nreg = if (quick) 19L else 100L,
+    nreg = if (quick) 21L else 100L,
     reported_quantiles = seq(0.1, 0.9, by = 0.1),
     crossing_diagnostics = FALSE,
     bootstrap_progress = FALSE
@@ -74,6 +81,20 @@ benchmark <- benchmark_qr_solvers_repeated(
 )
 fwrite(benchmark$raw, file.path(output_dir, "solver_benchmark_raw.csv"))
 fwrite(benchmark$summary, file.path(output_dir, "solver_benchmark_summary.csv"))
+expected_repetitions <- if (quick) 1L else 3L
+failed_benchmarks <- benchmark$summary[
+  benchmark$summary$failed_repetitions > 0L |
+    benchmark$summary$repetitions != expected_repetitions,
+  "solver",
+  drop = TRUE
+]
+if (length(failed_benchmarks)) {
+  stop(
+    "release solver validation failed for: ",
+    paste(failed_benchmarks, collapse = ", "),
+    call. = FALSE
+  )
+}
 
 metadata <- data.frame(
   item = c(
@@ -83,7 +104,9 @@ metadata <- data.frame(
   value = c(
     format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
     as.character(packageVersion("scalableCounterfactual")),
-    "1.0", as.character(quick), as.character(workers),
+    get(".cf_output_schema_version", envir =
+          asNamespace("scalableCounterfactual")),
+    as.character(quick), as.character(workers),
     R.version.string, R.version$platform
   ),
   stringsAsFactors = FALSE
